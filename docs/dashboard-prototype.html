@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>副屏仪表盘原型</title>
+<!--
+  扩展坞 3.5 英寸副屏 · 本地大模型实时性能仪表盘 · 可点击原型（仅设计稿，非正式实现）
+  画布：480×320 CSS px（macOS「480×320 HiDPI」，实际渲染 960×640）
+  打开 ?kiosk=1 只显示屏幕本身（纯黑背景、自动循环），可加 &theme=beige 切换主题。
+-->
+<style>
+  /* ============ 页面（屏幕之外）============ */
+  :root {
+    --page-bg: #17181b;
+    --page-panel: #222327;
+    --page-line: #2f3035;
+    --page-text: #e7e7ea;
+    --page-muted: #9b9da4;
+    --page-btn: #2d2e33;
+    --page-btn-hover: #37383e;
+    --page-accent: #e7e7ea;
+    --font: -apple-system, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page-bg);
+    color: var(--page-text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 32px;
+    padding: 28px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .page { grid-template-columns: minmax(0, 1fr); } }
+
+  .panel {
+    position: sticky; top: 28px;
+    display: flex; flex-direction: column; gap: 18px;
+    background: var(--page-panel);
+    border: 1px solid var(--page-line);
+    border-radius: 16px;
+    padding: 20px;
+    font-size: 13px; line-height: 1.6;
+  }
+  .panel h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+  .panel .sub { margin: 2px 0 0; color: var(--page-muted); font-size: 12.5px; }
+  .group { display: flex; flex-direction: column; gap: 8px; }
+  .group-title { font-size: 12px; color: var(--page-muted); letter-spacing: .06em; }
+  .btn-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  button, select {
+    font: inherit; color: var(--page-text);
+    background: var(--page-btn);
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 7px 8px;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  button:hover { background: var(--page-btn-hover); }
+  button[aria-pressed="true"] { background: var(--page-accent); color: #111; font-weight: 600; }
+  select { width: 100%; appearance: none; padding-right: 26px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--page-muted) 50%), linear-gradient(135deg, var(--page-muted) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+    background-size: 5px 5px; background-repeat: no-repeat; }
+  .primary { background: #e7e7ea; color: #111; font-weight: 650; padding: 9px; }
+  .primary:hover { background: #fff; }
+  .check { display: flex; gap: 8px; align-items: flex-start; color: var(--page-text); cursor: pointer; }
+  .check input { margin-top: 3px; accent-color: #e7e7ea; }
+  .check small { display: block; color: var(--page-muted); font-size: 12px; line-height: 1.5; }
+  .readout {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 12px;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum";
+    background: #1b1c1f; border-radius: 10px; padding: 10px 12px;
+  }
+  .readout dt { color: var(--page-muted); }
+  .readout dd { margin: 0; text-align: right; }
+  .kiosk-links { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .kiosk-links a {
+    display: block; text-align: center; text-decoration: none;
+    color: #111; background: #e7e7ea; border-radius: 9px; padding: 8px; font-weight: 600;
+  }
+  .kiosk-links a.beige { background: #f5efe4; color: #1a1714; }
+  .hint { color: var(--page-muted); font-size: 12px; line-height: 1.6; margin: 0; }
+  .hint kbd { font: inherit; background: var(--page-btn); border-radius: 4px; padding: 0 5px; color: var(--page-text); }
+  details { border-top: 1px solid var(--page-line); padding-top: 12px; }
+  summary { cursor: pointer; color: var(--page-text); font-weight: 600; }
+  details ul { margin: 8px 0 0; padding-left: 18px; color: var(--page-muted); font-size: 12.5px; }
+  details li { margin-bottom: 4px; text-wrap: pretty; }
+  details b { color: var(--page-text); font-weight: 600; }
+
+  .stage { display: flex; flex-direction: column; gap: 36px; min-width: 0; }
+  .fig { margin: 0; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+  .fig figcaption { display: flex; gap: 10px; align-items: baseline; font-size: 13px; color: var(--page-muted); }
+  .fig figcaption b { color: var(--page-text); font-weight: 600; font-size: 14px; }
+  .fig-scroll { max-width: 100%; overflow-x: auto; }
+
+  /* 扩展坞外壳：铝壳 + 黑色玻璃边 */
+  .bezel {
+    display: inline-block;
+    padding: 10px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, #4a4c52, #2c2d31);
+    box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 18px 40px rgba(0,0,0,.45);
+  }
+  .bezel-glass {
+    padding: 9px 10px;
+    border-radius: 10px;
+    background: #050506;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.04) inset;
+  }
+  .zoom2 { width: 960px; height: 640px; }
+  .zoom2 > .mount { width: 480px; height: 320px; transform: scale(2); transform-origin: 0 0; }
+  .mount { width: 480px; height: 320px; }
+
+  /* Kiosk 模式 */
+  .kiosk-stage { display: none; }
+  body.kiosk { background: #000; overflow: hidden; }
+  body.kiosk .page { display: none; }
+  body.kiosk .kiosk-stage {
+    display: flex; position: fixed; inset: 0;
+    align-items: center; justify-content: center; background: #000;
+  }
+  body.kiosk .kiosk-stage > .mount { transform-origin: center center; }
+  body.kiosk.hide-cursor, body.kiosk.hide-cursor * { cursor: none; }
+
+  /* ============ 屏幕（480×320）============ */
+  .screen {
+    /* 深色（默认） */
+    --bg: #0a0b0d;
+    --card: #14161a;
+    --card-line: #1d2025;
+    --text: #f3f4f6;
+    --text-2: #a7adb6;
+    --muted: #8c929b;
+    --faint: #555b64;
+    --track: #1d2025;
+    --accent: #76e2b7;
+    --amber: #f0b44c;
+    --danger: #e27a72;
+    --ghost: #59606a;
+    --pill-bg: rgba(118, 226, 183, .15);
+    --pill-text: #8eeac5;
+    --num-weight: 700;
+  }
+  .screen.theme-beige {
+    /* 暖米色（参考 MTPLX） */
+    --bg: #f5efe4;
+    --card: #ebe3d5;
+    --card-line: #ebe3d5;
+    --text: #161310;
+    --text-2: #5a5148;
+    --muted: #6c6256;
+    --faint: #a3978a;
+    --track: #e2d8c7;
+    --accent: #37302a;
+    --amber: #b1731c;
+    --danger: #a9453b;
+    --ghost: #b3a795;
+    --pill-bg: #37302a;
+    --pill-text: #f5efe4;
+    --num-weight: 800;
+  }
+  .screen {
+    position: relative;
+    width: 480px; height: 320px;
+    overflow: hidden;
+    padding: 12px;
+    display: grid;
+    grid-template-rows: 22px 268px;
+    row-gap: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    transition: background-color .4s, color .4s;
+    user-select: none;
+  }
+  .screen * { font-variant-numeric: tabular-nums; }
+
+  /* 状态条 */
+  .strip {
+    display: flex; align-items: center; gap: 8px;
+    height: 22px; padding: 0 2px;
+    font-size: 13px; line-height: 22px; white-space: nowrap;
+    color: var(--muted);
+  }
+  .strip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .strip .state-name { color: var(--text); font-size: 14px; font-weight: 650; }
+  .strip .strip-right { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+  .strip .strip-right b { color: var(--text-2); font-weight: 600; }
+  .screen[data-state="offline"] .dot { background: var(--danger); }
+  .screen[data-state="idle"] .dot { background: var(--faint); }
+  .screen[data-state="prefill"] .dot { background: var(--amber); animation: pulse 1s ease-in-out infinite; }
+  .screen[data-state="decode"] .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  .screen[data-state="done"] .dot { background: var(--accent); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .main { display: grid; grid-template-columns: 316px 132px; column-gap: 8px; height: 268px; }
+
+  /* 仪表 */
+  .gauge { position: relative; width: 316px; height: 268px; }
+  .gauge > svg.dial { position: absolute; inset: 0; overflow: visible; }
+  .dial .track { fill: none; stroke: var(--track); stroke-linecap: round; transition: opacity .6s, stroke .4s; }
+  .dial .notch { stroke: var(--bg); stroke-width: 2.5; transition: stroke .4s; }
+  .dial .value { fill: none; stroke: var(--accent); stroke-linecap: round; transition: opacity .6s, stroke .4s; }
+  .dial .ghost { fill: none; stroke: var(--ghost); stroke-linecap: round; opacity: 0; transition: opacity .6s; }
+  .dial .comet, .dial .comet-tail { fill: none; stroke: var(--amber); stroke-linecap: round; opacity: 0; transition: opacity .3s; }
+  .dial .tick { fill: var(--muted); font-size: 12px; font-weight: 600; font-family: var(--font); transition: opacity .6s; }
+  .gauge[data-arc="rest"] .value,
+  .gauge[data-arc="comet"] .value,
+  .gauge[data-arc="off"] .value { opacity: 0; }
+  .gauge[data-arc="rest"] .ghost { opacity: .9; }
+  .gauge[data-arc="comet"] .comet { opacity: 1; }
+  .gauge[data-arc="comet"] .comet-tail { opacity: .28; }
+  .gauge[data-arc="off"] .track { opacity: .5; }
+  .gauge[data-arc="off"] .tick { opacity: .35; }
+  .gauge[data-arc="rest"] .tick { opacity: .75; }
+
+  .center { position: absolute; inset: 0; pointer-events: none; }
+  .center > * { position: absolute; left: 44px; width: 220px; text-align: center; }
+  .cap {
+    top: 78px; height: 20px;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    font-size: 13px; color: var(--muted); white-space: nowrap;
+  }
+  .pill {
+    display: none;
+    font-size: 12px; line-height: 18px; font-weight: 650;
+    padding: 0 7px; border-radius: 9px;
+    background: var(--pill-bg); color: var(--pill-text);
+    letter-spacing: .04em;
+  }
+  .pill.on { display: inline-block; }
+  .screen[data-state="idle"] .pill { background: transparent; color: var(--muted); box-shadow: 0 0 0 1px var(--faint) inset; }
+  .big {
+    top: 97px; height: 96px;
+    font-size: 96px; line-height: 96px;
+    font-weight: var(--num-weight);
+    letter-spacing: -0.035em;
+    color: var(--text);
+    white-space: nowrap;
+    transition: color .5s;
+  }
+  .big .dec { font-size: 40px; letter-spacing: -0.01em; margin-left: 1px; }
+  .big.whole .dec { font-size: inherit; letter-spacing: inherit; margin-left: 0; }
+  .screen[data-state="idle"] .big { color: var(--text-2); }
+  .unit { top: 194px; font-size: 15px; line-height: 18px; font-weight: 600; color: var(--muted); }
+  .spark { top: 216px; left: 94px !important; width: 120px !important; height: 26px; opacity: 0; transition: opacity .5s; }
+  .spark.on { opacity: 1; }
+  .spark .raw { fill: none; stroke: var(--faint); stroke-width: 1; stroke-linejoin: round; }
+  .spark .smooth { fill: none; stroke: var(--accent); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
+  .offline-msg { top: 108px; display: none; }
+  .offline-msg .t1 { font-size: 28px; line-height: 36px; font-weight: 650; color: var(--text-2); }
+  .offline-msg .t2 { margin-top: 6px; font-size: 13px; line-height: 18px; color: var(--muted); }
+  .screen[data-state="offline"] .offline-msg { display: block; }
+  .screen[data-state="offline"] .cap,
+  .screen[data-state="offline"] .big,
+  .screen[data-state="offline"] .unit { display: none; }
+
+  /* 右侧数据块 */
+  .stats { display: flex; flex-direction: column; gap: 6px; height: 268px; }
+  .card {
+    flex: 1 1 0; min-height: 0;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 8px 12px;
+    background: var(--card);
+    border: 1px solid var(--card-line);
+    border-radius: 14px;
+    transition: background-color .4s, border-color .4s;
+  }
+  .card .lab { font-size: 13px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+  .card .val {
+    display: flex; align-items: baseline; gap: 4px;
+    font-size: 30px; line-height: 34px;
+    font-weight: var(--num-weight);
+    letter-spacing: -0.02em;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .card .val small { font-size: 13px; font-weight: 600; letter-spacing: 0; color: var(--muted); }
+  .card .val.pending { color: var(--faint); }
+  .card .foot { font-size: 13px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+  .card .foot:empty { display: none; }
+  .screen[data-state="idle"] .card .val,
+  .screen[data-state="offline"] .card .val { color: var(--text-2); }
+
+  /* 状态切换淡入 */
+  .screen.swap .center, .screen.swap .stats, .screen.swap .strip { animation: swapin .32s ease-out; }
+  .screen.swap-slow .center, .screen.swap-slow .stats, .screen.swap-slow .strip { animation: swapin .8s ease-in-out; }
+  @keyframes swapin { from { opacity: .15; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .screen.swap .center, .screen.swap .stats, .screen.swap .strip,
+    .screen.swap-slow .center, .screen.swap-slow .stats, .screen.swap-slow .strip { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <aside class="panel" aria-label="控制面板">
+    <div>
+      <h1>副屏仪表盘 · 原型</h1>
+      <p class="sub">TensorFold · Qwen3.8-27B 4-bit · M5 Max 64 GB<br>画布 480×320（HiDPI 实际 960×640）</p>
+    </div>
+
+    <div class="group">
+      <div class="group-title">切换状态</div>
+      <div class="btn-grid" id="stateBtns">
+        <button type="button" data-set-state="offline">引擎离线</button>
+        <button type="button" data-set-state="idle">空闲</button>
+        <button type="button" data-set-state="prefill">预填充</button>
+        <button type="button" data-set-state="decode">解码</button>
+        <button type="button" data-set-state="done">完成</button>
+      </div>
+      <p class="hint">手动切换时会停住在该状态（解码会持续产出，方便观察平滑效果）。</p>
+    </div>
+
+    <div class="group">
+      <div class="group-title">模拟请求</div>
+      <select id="scenario" aria-label="请求类型">
+        <option value="auto">自动轮换（散文 / 代码 / 长输出 / 长提示）</option>
+        <option value="prose">中文散文 · 58.2 tok/s</option>
+        <option value="code">Python 代码 · 109.6 tok/s</option>
+        <option value="long">长提示 3.5 万 token · 预填充约 4 s</option>
+        <option value="longout">长输出 1.24 万 token（从 11,200 起播，看 K 格式）</option>
+      </select>
+      <button type="button" class="primary" id="simBtn">模拟一次请求</button>
+      <label class="check"><input type="checkbox" id="loopChk"><span>连续循环<small>空闲几秒后自动发起下一次请求</small></span></label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">主题</div>
+      <div class="seg" id="themeBtns">
+        <button type="button" data-set-theme="dark">深色</button>
+        <button type="button" data-set-theme="beige">暖米色</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">显示</div>
+      <label class="check"><input type="checkbox" id="sparkChk" checked><span>原始速率小曲线<small>淡线 = 原始 1 秒速率（跳动大），实线 = 2.5 秒平滑值</small></span></label>
+    </div>
+
+    <div class="group">
+      <div class="group-title">实时数值（调试）</div>
+      <dl class="readout">
+        <dt>原始 1 秒</dt><dd id="roRaw">—</dd>
+        <dt>平滑 2.5 秒</dt><dd id="roSmooth">—</dd>
+        <dt>屏幕显示</dt><dd id="roShown">—</dd>
+      </dl>
+    </div>
+
+    <div class="group">
+      <div class="group-title">在副屏上实测（Kiosk 模式）</div>
+      <div class="kiosk-links">
+        <a href="?kiosk=1" target="_blank" rel="noopener">深色 Kiosk</a>
+        <a href="?kiosk=1&amp;theme=beige" target="_blank" rel="noopener" class="beige">暖米色 Kiosk</a>
+      </div>
+      <p class="hint">打开后把浏览器窗口拖到扩展坞屏幕上，按 <kbd>⌃⌘F</kbd> 全屏。只显示屏幕本身、自动循环模拟；按 <kbd>T</kbd> 切换主题。窗口比 480×320 小时会自动等比缩小。</p>
+    </div>
+
+    <details>
+      <summary>设计说明</summary>
+      <ul>
+        <li><b>布局</b>：左 2/3 为 270° 弧形仪表 + 主数字，右 1/3 为 3 个数据块，顶部一条状态条。四周留 12px。</li>
+        <li><b>字号</b>：主数字 96px；右侧数值 30px；标签 / 状态条 13–14px；刻度 12px（全场最小）。</li>
+        <li><b>刻度非线性</b>：0 / 25 / 50 / 100 / 150 / 200，低速段拉宽，30–190 tok/s 的常见区间都看得清。</li>
+        <li><b>平滑</b>：主数字 = 最近 2.5 秒内产出 token 数 ÷ 2.5 秒（开头不足 2.5 秒时按已用时间算，最少按 0.5 秒）；弧线和数字再以约 0.4 秒时间常数缓动。</li>
+        <li><b>峰值</b>：只统计解码开始 1 秒之后的平滑值，避免开头的假尖峰。</li>
+        <li><b>预填充</b>：本版本拿不到进度和提示长度，所以只显示已用秒数 + 来回扫动的弧段，不显示百分比或剩余时间。超过 1.5 秒时状态条提示「提示较长」。</li>
+        <li><b>解码</b>：右侧为 输出 / 平均 / 峰值。「平均」= 首字之后的输出 tokens ÷ 首字之后经过的时间，和引擎最终 tok/s 同一算法，会逐渐收敛到完成时的精确值。首字时间放在状态条。第 1 层解码中拿不到接受率，所以不显示。</li>
+        <li><b>完成</b>：大数字是引擎给出的本次平均速度（精确值），带「精确」标记；4 秒后淡回空闲（手动选择时停留）。</li>
+        <li><b>空闲</b>：主数字变灰，显示上一次的最终速度；弧线上留一个小点标出上次位置。</li>
+      </ul>
+    </details>
+  </aside>
+
+  <main class="stage">
+    <figure class="fig">
+      <figcaption><b>实际尺寸</b><span>480×320 CSS px · 在副屏上即 1:1</span></figcaption>
+      <div class="bezel"><div class="bezel-glass"><div class="mount" id="mount1x"></div></div></div>
+    </figure>
+    <figure class="fig">
+      <figcaption><b>放大 2×</b><span>= 副屏的真实像素 960×640，用于检查细节</span></figcaption>
+      <div class="fig-scroll">
+        <div class="bezel"><div class="bezel-glass"><div class="zoom2"><div class="mount" id="mount2x"></div></div></div></div>
+      </div>
+    </figure>
+  </main>
+</div>
+
+<div class="kiosk-stage"><div class="mount" id="mountKiosk"></div></div>
+
+<template id="screenTpl">
+  <div class="screen" data-state="idle">
+    <header class="strip">
+      <span class="dot"></span>
+      <span class="state-name" data-k="stateName">空闲</span>
+      <span data-k="stripLeft">Qwen3.8-27B</span>
+      <span class="strip-right" data-k="stripRight"></span>
+    </header>
+    <div class="main">
+      <div class="gauge" data-arc="rest">
+        <svg class="dial" viewBox="0 0 316 268" width="316" height="268" aria-hidden="true">
+          <path class="track" pathLength="1000"></path>
+          <g class="notches"></g>
+          <path class="ghost" pathLength="1000"></path>
+          <path class="comet-tail" pathLength="1000"></path>
+          <path class="comet" pathLength="1000"></path>
+          <path class="value" pathLength="1000"></path>
+          <g class="ticks"></g>
+        </svg>
+        <div class="center">
+          <div class="cap"><span data-k="cap">上次平均</span><span class="pill">精确</span></div>
+          <div class="big"><span data-k="bigInt">58</span><span class="dec" data-k="bigDec">.2</span></div>
+          <div class="unit" data-k="unit">tok/s</div>
+          <svg class="spark" viewBox="0 0 120 26" width="120" height="26" aria-hidden="true">
+            <polyline class="raw" points=""></polyline>
+            <polyline class="smooth" points=""></polyline>
+          </svg>
+          <div class="offline-msg">
+            <div class="t1">引擎离线</div>
+            <div class="t2">等待 TensorFold 响应…</div>
+          </div>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="card"><div class="lab" data-k="l0"></div><div class="val" data-k-val="0"><span data-k="v0"></span><small data-k="u0"></small></div><div class="foot" data-k="f0"></div></div>
+        <div class="card"><div class="lab" data-k="l1"></div><div class="val" data-k-val="1"><span data-k="v1"></span><small data-k="u1"></small></div><div class="foot" data-k="f1"></div></div>
+        <div class="card"><div class="lab" data-k="l2"></div><div class="val" data-k-val="2"><span data-k="v2"></span><small data-k="u2"></small></div><div class="foot" data-k="f2"></div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- 参数 ----------
+  const qs = new URLSearchParams(location.search);
+  const KIOSK = qs.get('kiosk') === '1';
+  let theme = qs.get('theme') === 'beige' ? 'beige' : 'dark';
+  if (!qs.get('theme') && !KIOSK) {
+    try { theme = localStorage.getItem('dock-dash-theme') || theme; } catch (e) {}
+  }
+
+  const MODEL = 'Qwen3.8-27B';
+  const MEM_TOTAL = 64;
+  const CTX_MAX = 262144;
+  const WINDOW = 2.5;          // 平滑窗口（秒）
+  const EASE_TAU = 0.4;        // 弧线/数字缓动时间常数（秒）
+  const DONE_HOLD = 4;         // 完成态停留（秒）
+
+  // 实测数据
+  const SCEN = {
+    prose: { name: '中文散文',    prompt: 22,    cached: 0,     ttft: 0.457, out: 570, final: 58.2,  accept: 61, mem: 21.4 },
+    code:  { name: 'Python 代码', prompt: 32,    cached: 0,     ttft: 0.102, out: 600, final: 109.6, accept: 78, mem: 21.5 },
+    long:  { name: '长提示',      prompt: 35012, cached: 21007, ttft: 4.08,  out: 420, final: 44.8,  accept: 66, mem: 24.3 },
+    // 演示用：编程代理的长输出，从第 11,200 个 token 起播，只模拟最后 1,200 个，用来看 K 格式
+    longout: { name: '长输出',    prompt: 18420, cached: 16384, ttft: 0.62,  out: 12400, final: 104.3, accept: 74, mem: 22.8, skip: 11200 },
+  };
+  const ROTATION = ['prose', 'code', 'longout', 'prose', 'code', 'long'];
+
+  // ---------- 仪表几何 ----------
+  const G = { cx: 154, cy: 144, R: 124, SW: 14 };
+  const TICKS = [0, 25, 50, 100, 150, 200];
+  const TF    = [0, .2, .4, .6, .8, 1];       // 刻度位置（0–1）：5 段等分，左右对称；数值非线性（前两段各 25，后三段各 50）
+  const v2f = (v) => {
+    if (v <= 0) return 0;
+    if (v >= 200) return 1;
+    for (let i = 1; i < TICKS.length; i++) {
+      if (v <= TICKS[i]) {
+        const t = (v - TICKS[i - 1]) / (TICKS[i] - TICKS[i - 1]);
+        return TF[i - 1] + t * (TF[i] - TF[i - 1]);
+      }
+    }
+    return 1;
+  };
+  const f2deg = (f) => 225 - 270 * f;
+  const pt = (deg, r) => {
+    const a = deg * Math.PI / 180;
+    return [G.cx + r * Math.cos(a), G.cy - r * Math.sin(a)];
+  };
+  const fx = (n) => n.toFixed(2);
+
+  function buildDial(svg) {
+    const [sx, sy] = pt(225, G.R), [ex, ey] = pt(-45, G.R);
+    const d = `M ${fx(sx)} ${fx(sy)} A ${G.R} ${G.R} 0 1 1 ${fx(ex)} ${fx(ey)}`;
+    svg.querySelectorAll('path').forEach(p => { p.setAttribute('d', d); p.setAttribute('stroke-width', G.SW); });
+    const NS = 'http://www.w3.org/2000/svg';
+    const notches = svg.querySelector('.notches');
+    const ticks = svg.querySelector('.ticks');
+    TF.forEach((f, i) => {
+      const deg = f2deg(f);
+      if (f > 0 && f < 1) {
+        const [x1, y1] = pt(deg, G.R - G.SW / 2 - 1), [x2, y2] = pt(deg, G.R + G.SW / 2 + 1);
+        const ln = document.createElementNS(NS, 'line');
+        ln.setAttribute('class', 'notch');
+        ln.setAttribute('x1', fx(x1)); ln.setAttribute('y1', fx(y1));
+        ln.setAttribute('x2', fx(x2)); ln.setAttribute('y2', fx(y2));
+        notches.appendChild(ln);
+      }
+      const c = Math.cos(deg * Math.PI / 180);
+      let anchor = 'middle', r = G.R + 20;
+      if (c < -0.85) { anchor = 'end'; r = G.R + 12; }
+      else if (c > 0.85) { anchor = 'start'; r = G.R + 12; }
+      const [tx, ty] = pt(deg, r);
+      const t = document.createElementNS(NS, 'text');
+      t.setAttribute('class', 'tick');
+      t.setAttribute('x', fx(tx)); t.setAttribute('y', fx(ty));
+      t.setAttribute('text-anchor', anchor);
+      t.setAttribute('dominant-baseline', 'central');
+      t.textContent = TICKS[i];
+      ticks.appendChild(t);
+    });
+  }
+
+  // ---------- 创建屏幕实例 ----------
+  const tpl = document.getElementById('screenTpl');
+  const mounts = KIOSK ? ['mountKiosk'] : ['mount1x', 'mount2x'];
+  const screens = mounts.map(id => {
+    const mount = document.getElementById(id);
+    const node = tpl.content.firstElementChild.cloneNode(true);
+    mount.appendChild(node);
+    buildDial(node.querySelector('svg.dial'));
+    const k = {};
+    node.querySelectorAll('[data-k]').forEach(el => { k[el.dataset.k] = el; });
+    return {
+      root: node, k,
+      gauge: node.querySelector('.gauge'),
+      value: node.querySelector('.dial .value'),
+      ghost: node.querySelector('.dial .ghost'),
+      comet: node.querySelector('.dial .comet'),
+      tail: node.querySelector('.dial .comet-tail'),
+      pill: node.querySelector('.pill'),
+      big: node.querySelector('.big'),
+      spark: node.querySelector('.spark'),
+      sparkRaw: node.querySelector('.spark .raw'),
+      sparkSmooth: node.querySelector('.spark .smooth'),
+      vals: [...node.querySelectorAll('[data-k-val]')],
+      cache: {},
+    };
+  });
+
+  // ---------- 状态 ----------
+  const now = () => performance.now() / 1000;
+  const S = {
+    state: 'idle', since: now(), manual: false,
+    last: finalsOf(SCEN.prose),
+    req: null,
+    offlineSince: now() - 42,
+    display: 0,
+    showSpark: true,
+    autoLoop: KIOSK, loopNextAt: now() + 2.5,
+    rot: 0,
+    spark: [], sparkAt: 0,
+    lastFrame: now(),
+    swap: null,
+  };
+
+  function finalsOf(sc) {
+    return {
+      final: sc.final, out: sc.out, ttft: sc.ttft, prompt: sc.prompt, cached: sc.cached,
+      accept: sc.accept, ctx: sc.prompt + sc.out, mem: sc.mem,
+    };
+  }
+
+  function setState(st, opts = {}) {
+    const prev = S.state;
+    S.state = st;
+    S.since = now();
+    if (prev !== st) S.swap = opts.slow ? 'swap-slow' : 'swap';
+    syncButtons();
+  }
+
+  // 由平均速度反推「每轮平均 token 数」，并按随机「难易段」上下浮动
+  function newRequest(key, endless) {
+    const sc = SCEN[key];
+    const t = now();
+    return {
+      key, sc, endless: !!endless,
+      t0: t, decodeStart: 0, emitted: 0, events: [],
+      nextRound: 0, regimeUntil: 0, mult: 1,
+      peak: 0, smooth: 0, raw: 0,
+      acc: sc.accept, accAt: 0,
+      memStart: S.last ? Math.min(S.last.mem, 21.3) : 21.2,
+    };
+  }
+
+  function startRequest(key) {
+    if (key === 'auto' || !key) { key = ROTATION[S.rot % ROTATION.length]; S.rot++; }
+    S.manual = false;
+    S.req = newRequest(key);
+    S.spark = [];
+    setState('prefill');
+  }
+
+  function beginDecode(t) {
+    const r = S.req;
+    r.decodeStart = t;
+    r.nextRound = t;
+    r.regimeUntil = t;
+    S.spark = [];
+    setState('decode');
+  }
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function emitRound(r, t) {
+    // 难易段：投机解码在「好猜」的片段一次吐 6–8 个，难的地方只吐 1–2 个
+    if (t >= r.regimeUntil) {
+      const x = Math.random();
+      r.mult = x < 0.35 ? 0.45 : x < 0.7 ? 1.0 : 1.75;
+      r.regimeUntil = t + rand(0.5, 1.4);
+    }
+    const target = r.sc.final;
+    const elapsed = t - r.decodeStart;
+    let fb = 1;
+    if (elapsed > 0.8 && r.emitted > 0) fb = Math.min(1.5, Math.max(0.7, (target * elapsed) / r.emitted));
+    const meanInterval = 0.05;
+    let m = target * meanInterval * r.mult * fb;
+    m = Math.min(7.6, Math.max(1, m));
+    const p = (m - 1) / 7;
+    let k = 1;
+    for (let i = 0; i < 7; i++) if (Math.random() < p) k++;
+    if (!r.endless) k = Math.min(k, r.sc.out - (r.sc.skip || 0) - r.emitted);
+    r.emitted += k;
+    r.events.push([t, k]);
+    r.nextRound = t + rand(0.03, 0.07);
+  }
+
+  function finishRequest(t) {
+    const r = S.req;
+    S.last = finalsOf(r.sc);
+    S.last.peak = r.peak;
+    setState('done');
+  }
+
+  // ---------- 手动状态 ----------
+  function manualState(st) {
+    S.manual = true;
+    S.autoLoop = false;
+    document.getElementById('loopChk').checked = false;
+    if (st === 'offline') { S.req = null; S.offlineSince = now() - 42; setState('offline'); }
+    else if (st === 'idle') { S.req = null; setState('idle'); }
+    else if (st === 'prefill') { S.req = newRequest('long', true); S.req.t0 = now(); setState('prefill'); }
+    else if (st === 'decode') {
+      S.req = newRequest('prose', true);
+      S.req.t0 = now() - SCEN.prose.ttft;
+      beginDecode(now());
+    }
+    else if (st === 'done') {
+      const key = 'code';
+      S.req = newRequest(key);
+      S.spark = [];
+      S.last = finalsOf(SCEN[key]);
+      S.last.peak = 138;
+      setState('done');
+    }
+  }
+
+  // ---------- 格式化 ----------
+  const nf = (n) => Math.round(n).toLocaleString('en-US');
+  // token 数：不到 1,000 显示原值；1,000–99,999 显示一位小数的 K（6.2K，保留 .0 让计数时宽度不跳）；10 万以上显示整数 K
+  const tokFmt = (n) => { n = Math.round(n); return n < 1000 ? String(n) : n < 99950 ? (n / 1000).toFixed(1) + 'K' : Math.round(n / 1000) + 'K'; };
+  const ctxFmt = tokFmt;
+  const split1 = (x) => { const s = x.toFixed(1); const i = s.indexOf('.'); return [s.slice(0, i), s.slice(i)]; };
+
+  // ---------- 视图模型 ----------
+  function view(t) {
+    const V = {
+      state: S.state, stateName: '', stripLeft: MODEL, stripRight: '',
+      cap: '', pill: false, bigInt: '', bigDec: '', whole: false, unit: 'tok/s',
+      arc: 'rest', ghostF: v2f(S.last.final), comet: null, spark: false,
+      cards: [],
+    };
+    const L = S.last;
+    const r = S.req;
+    const memCard = (m) => ({ l: '内存', v: m.toFixed(1), u: 'GB', f: `共 ${MEM_TOTAL} GB` });
+
+    switch (S.state) {
+      case 'offline': {
+        V.stateName = '引擎离线';
+        V.stripLeft = `上次模型 ${MODEL}`;
+        V.arc = 'off';
+        const secs = Math.floor(t - S.offlineSince);
+        const off = secs < 60 ? { v: String(secs), u: '秒' } : { v: String(Math.floor(secs / 60)), u: '分钟' };
+        V.cards = [
+          { l: '上次平均', v: L.final.toFixed(1), u: '', f: 'tok/s' },
+          { l: '已离线', v: off.v, u: off.u, f: '' },
+          { l: '内存', v: '7.9', u: 'GB', f: `共 ${MEM_TOTAL} GB` },
+        ];
+        break;
+      }
+      case 'idle': {
+        V.stateName = '空闲';
+        V.cap = '上次平均'; V.pill = true;
+        [V.bigInt, V.bigDec] = split1(L.final);
+        V.arc = 'rest';
+        V.cards = [
+          { l: '输出', v: tokFmt(L.out), u: 'tok', f: '' },
+          { l: '首字', v: L.ttft.toFixed(2), u: 's', f: '' },
+          memCard(L.mem),
+        ];
+        break;
+      }
+      case 'prefill': {
+        const el = t - r.t0;
+        V.stateName = '预填充中';
+        V.stripRight = el > 1.5 ? '提示较长，可能需要几秒' : '';
+        V.cap = '已用时';
+        V.whole = true;
+        if (el < 10) { [V.bigInt, V.bigDec] = split1(el); } else { V.bigInt = String(Math.floor(el)); V.bigDec = ''; }
+        V.unit = '秒';
+        V.arc = 'comet';
+        V.comet = (el % 1.5) / 1.5;
+        const grow = r.key === 'long' ? Math.min(1, el / r.sc.ttft) : 0;
+        V.cards = [
+          { l: '输出', v: '—', u: '', f: '', pending: true },
+          { l: '首字', v: '—', u: '', f: '等待首个 token', pending: true },
+          memCard(r.memStart + (r.sc.mem - r.memStart) * grow),
+        ];
+        break;
+      }
+      case 'decode': {
+        V.stateName = '解码中';
+        V.stripRight = `首字 <b>${r.sc.ttft.toFixed(2)}</b> s · 内存 <b>${(r.sc.mem + r.emitted * 0.00002).toFixed(1)}</b> / ${MEM_TOTAL} GB`;
+        V.cap = '解码速度';
+        V.bigInt = String(Math.round(S.display)); V.bigDec = '';
+        V.arc = 'value';
+        V.spark = true;
+        V.cards = [
+          { l: '输出', v: tokFmt((r.sc.skip || 0) + r.emitted), u: 'tok', f: '' },
+          // 本次平均：首字之后的输出 tokens ÷ 首字之后经过的时间（和引擎最终 tok/s 同一算法），前 0.5 秒不显示
+          (() => { const el = t - r.decodeStart; return el >= 0.5 ? { l: '平均', v: (r.emitted / el).toFixed(1), u: '', f: 'tok/s' } : { l: '平均', v: '—', u: '', f: '', pending: true }; })(),
+          { l: '峰值', v: r.peak > 0 ? String(Math.round(r.peak)) : '—', u: r.peak > 0 ? 'tok/s' : '', f: '', pending: !(r.peak > 0) },
+        ];
+        break;
+      }
+      case 'done': {
+        V.stateName = '完成';
+        V.stripRight = `上下文 <b>${ctxFmt(L.ctx)}</b> / 262K`;
+        V.cap = '平均速度'; V.pill = true;
+        [V.bigInt, V.bigDec] = split1(L.final);
+        V.arc = 'value';
+        V.spark = S.spark.length > 5;
+        const hit = L.prompt ? Math.round(L.cached / L.prompt * 100) : 0;
+        V.cards = [
+          { l: '输出', v: tokFmt(L.out), u: 'tok', f: `提示 ${tokFmt(L.prompt)} tok` },
+          { l: '缓存命中', v: String(hit), u: '%', f: `${tokFmt(L.cached)} tok` },
+          { l: '接受率', v: String(L.accept), u: '%', f: '' },
+        ];
+        break;
+      }
+    }
+    return V;
+  }
+
+  // ---------- 写入 DOM（只在变化时写） ----------
+  function setText(scr, key, val, html) {
+    if (scr.cache[key] === val) return;
+    scr.cache[key] = val;
+    const el = scr.k[key];
+    if (!el) return;
+    if (html) el.innerHTML = val; else el.textContent = val;
+  }
+  function setAttr(scr, cacheKey, el, attr, val) {
+    if (scr.cache[cacheKey] === val) return;
+    scr.cache[cacheKey] = val;
+    el.setAttribute(attr, val);
+  }
+
+  function sparkPoints(key) {
+    const n = S.spark.length;
+    if (n < 2) return '';
+    const W = 120, H = 26;
+    const step = W / 79;
+    const x0 = W - (n - 1) * step;
+    let s = '';
+    for (let i = 0; i < n; i++) {
+      const v = v2f(S.spark[i][key]);   // 与仪表同一非线性刻度
+      s += (x0 + i * step).toFixed(1) + ',' + (H - 1.5 - v * (H - 3)).toFixed(1) + ' ';
+    }
+    return s;
+  }
+
+  function apply(V) {
+    const swap = S.swap; S.swap = null;
+    const f = v2f(S.display);
+    const rawPts = V.spark ? sparkPoints('raw') : null;
+    const smPts = V.spark ? sparkPoints('smooth') : null;
+    for (const scr of screens) {
+      const root = scr.root;
+      if (scr.cache.theme !== theme) {
+        scr.cache.theme = theme;
+        root.classList.toggle('theme-beige', theme === 'beige');
+      }
+      if (root.dataset.state !== V.state) root.dataset.state = V.state;
+      if (swap) {
+        root.classList.remove('swap', 'swap-slow');
+        void root.offsetWidth;
+        root.classList.add(swap);
+      }
+      setText(scr, 'stateName', V.stateName);
+      setText(scr, 'stripLeft', V.stripLeft);
+      setText(scr, 'stripRight', V.stripRight, true);
+      setText(scr, 'cap', V.cap);
+      setText(scr, 'bigInt', V.bigInt);
+      setText(scr, 'bigDec', V.bigDec);
+      setText(scr, 'unit', V.unit);
+      if (scr.cache.pill !== V.pill) { scr.cache.pill = V.pill; scr.pill.classList.toggle('on', V.pill); }
+      if (scr.cache.whole !== V.whole) { scr.cache.whole = V.whole; scr.big.classList.toggle('whole', V.whole); }
+      if (scr.gauge.dataset.arc !== V.arc) scr.gauge.dataset.arc = V.arc;
+
+      // 数值弧
+      setAttr(scr, 'valDash', scr.value, 'stroke-dasharray', `${(f * 1000).toFixed(1)} 2000`);
+      // 空闲时的「上次位置」小点
+      const g = Math.max(0, V.ghostF * 1000 - 0.5);
+      setAttr(scr, 'ghostDash', scr.ghost, 'stroke-dasharray', '1 3000');
+      setAttr(scr, 'ghostOff', scr.ghost, 'stroke-dashoffset', (-g).toFixed(1));
+      // 预填充：不确定进度的扫动弧段
+      if (V.comet !== null) {
+        const ph = V.comet;
+        const e = ph < .5 ? 2 * ph * ph : 1 - Math.pow(-2 * ph + 2, 2) / 2;
+        const L = 130, T = 240;
+        const head = e * (1000 + 20) - 10;         // 头部位置
+        const s = head - L;
+        scr.comet.setAttribute('stroke-dasharray', `${Math.max(0, Math.min(1000, head) - Math.max(0, s)).toFixed(1)} 3000`);
+        scr.comet.setAttribute('stroke-dashoffset', (-Math.max(0, s)).toFixed(1));
+        const ts = head - T;
+        scr.tail.setAttribute('stroke-dasharray', `${Math.max(0, Math.min(1000, head) - Math.max(0, ts)).toFixed(1)} 3000`);
+        scr.tail.setAttribute('stroke-dashoffset', (-Math.max(0, ts)).toFixed(1));
+      }
+      // 小曲线
+      const sparkOn = V.spark && S.showSpark;
+      if (scr.cache.spark !== sparkOn) { scr.cache.spark = sparkOn; scr.spark.classList.toggle('on', sparkOn); }
+      if (sparkOn) {
+        setAttr(scr, 'sr', scr.sparkRaw, 'points', rawPts);
+        setAttr(scr, 'ss', scr.sparkSmooth, 'points', smPts);
+      }
+      // 卡片
+      V.cards.forEach((c, i) => {
+        setText(scr, 'l' + i, c.l);
+        setText(scr, 'v' + i, c.v);
+        setText(scr, 'u' + i, c.u);
+        setText(scr, 'f' + i, c.f);
+        const pend = !!c.pending;
+        if (scr.cache['p' + i] !== pend) { scr.cache['p' + i] = pend; scr.vals[i].classList.toggle('pending', pend); }
+      });
+    }
+  }
+
+  // ---------- 主循环 ----------
+  const roRaw = document.getElementById('roRaw');
+  const roSmooth = document.getElementById('roSmooth');
+  const roShown = document.getElementById('roShown');
+  let roAt = 0;
+
+  function frame() {
+    const t = now();
+    const dt = Math.min(0.1, t - S.lastFrame);
+    S.lastFrame = t;
+    const r = S.req;
+
+    if (S.state === 'prefill' && r && !r.endless && t >= r.t0 + r.sc.ttft) {
+      beginDecode(r.t0 + r.sc.ttft);
+    }
+
+    let target = 0;
+    if (S.state === 'decode' && r) {
+      while (t >= r.nextRound && (r.endless || r.emitted < r.sc.out - (r.sc.skip || 0))) emitRound(r, r.nextRound);
+      const cut = t - 10;
+      while (r.events.length && r.events[0][0] < cut) r.events.shift();
+      let inWin = 0, in1 = 0;
+      for (let i = r.events.length - 1; i >= 0; i--) {
+        const [et, k] = r.events[i];
+        if (et <= t - WINDOW) break;
+        inWin += k;
+        if (et > t - 1) in1 += k;
+      }
+      const el = t - r.decodeStart;
+      r.smooth = inWin / Math.max(0.5, Math.min(WINDOW, el));
+      r.raw = in1 / Math.max(0.25, Math.min(1, el));
+      if (el > 1.0) r.peak = Math.max(r.peak, r.smooth);
+      // 草稿接受率：随时间收敛到最终值
+      if (t - r.accAt > 0.6) {
+        r.accAt = t;
+        const spread = Math.max(1.5, 9 * (1 - el / 6));
+        r.acc = r.sc.accept + rand(-spread, spread);
+      }
+      if (t - S.sparkAt >= 0.1) {
+        S.sparkAt = t;
+        S.spark.push({ raw: r.raw, smooth: r.smooth });
+        if (S.spark.length > 80) S.spark.shift();
+      }
+      target = r.smooth;
+      if (!r.endless && r.emitted >= r.sc.out - (r.sc.skip || 0)) finishRequest(t);
+    } else if (S.state === 'done') {
+      target = S.last.final;
+      if (!S.manual && t - S.since > DONE_HOLD) setState('idle', { slow: true });
+    }
+
+    S.display += (target - S.display) * (1 - Math.exp(-dt / EASE_TAU));
+    if (Math.abs(S.display - target) < 0.02) S.display = target;
+
+    if (S.state === 'idle' && S.autoLoop && !S.manual) {
+      if (t >= S.loopNextAt) { startRequest(document.getElementById('scenario').value); }
+    } else if (S.state !== 'idle') {
+      S.loopNextAt = t + rand(3, 5);
+    }
+
+    apply(view(t));
+
+    if (!KIOSK && t - roAt > 0.1) {
+      roAt = t;
+      const live = S.state === 'decode' && r;
+      roRaw.textContent = live ? `${r.raw.toFixed(1)} tok/s` : '—';
+      roSmooth.textContent = live ? `${r.smooth.toFixed(1)} tok/s` : '—';
+      roShown.textContent = (S.state === 'decode' || S.state === 'done') ? `${S.display.toFixed(1)} tok/s` : '—';
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- 控制面板 ----------
+  function syncButtons() {
+    if (KIOSK) return;
+    document.querySelectorAll('[data-set-state]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.setState === S.state)));
+    document.querySelectorAll('[data-set-theme]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.setTheme === theme)));
+  }
+  function setTheme(th) {
+    theme = th;
+    try { if (!KIOSK) localStorage.setItem('dock-dash-theme', th); } catch (e) {}
+    syncButtons();
+  }
+
+  if (KIOSK) {
+    document.body.classList.add('kiosk');
+    const m = document.getElementById('mountKiosk');
+    const fit = () => {
+      // 等比铺满窗口（可放大也可缩小）；用 zoom 而不是 transform，放大后文字按新尺寸重新渲染，保持清晰
+      const s = Math.min(window.innerWidth / 480, window.innerHeight / 320);
+      m.style.zoom = String(s);
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    let hideT;
+    const wake = () => { document.body.classList.remove('hide-cursor'); clearTimeout(hideT); hideT = setTimeout(() => document.body.classList.add('hide-cursor'), 1500); };
+    window.addEventListener('mousemove', wake); wake();
+    window.addEventListener('keydown', (e) => { if (e.key === 't' || e.key === 'T') setTheme(theme === 'dark' ? 'beige' : 'dark'); });
+    S.autoLoop = true;
+  } else {
+    document.querySelectorAll('[data-set-state]').forEach(b => b.addEventListener('click', () => manualState(b.dataset.setState)));
+    document.querySelectorAll('[data-set-theme]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.setTheme)));
+    document.getElementById('simBtn').addEventListener('click', () => startRequest(document.getElementById('scenario').value));
+    document.getElementById('loopChk').addEventListener('change', (e) => {
+      S.autoLoop = e.target.checked;
+      if (S.autoLoop) {
+        S.manual = false; S.loopNextAt = now() + 0.5;
+        if (S.state !== 'idle' && (!S.req || S.req.endless || S.state === 'done')) { S.req = null; setState('idle'); }
+      }
+    });
+    document.getElementById('sparkChk').addEventListener('change', (e) => { S.showSpark = e.target.checked; });
+  }
+
+  syncButtons();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

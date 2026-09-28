@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>TFPanel 图标</title>
+<style>
+  body { margin: 0; padding: 24px; background: #e9e6e0; font: 13px -apple-system, sans-serif; color: #333; }
+  body.dark { background: #1e1e1e; color: #ccc; }
+  .row { display: flex; gap: 28px; align-items: flex-end; flex-wrap: wrap; }
+  figure { margin: 0; text-align: center; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div class="row" id="row"></div>
+<script>
+// 以 1024 为基准坐标绘制；主体按 macOS 图标网格留 100px 边距（824 圆角方块）。
+const deg = d => d * Math.PI / 180;
+const C = { x: 512, y: 560, r: 282, w: 84 };   // 表盘圆心、半径、弧宽
+const A0 = 150, SWEEP = 240, VALUE = 0.78;      // 起始角、总扫角、读数比例
+
+function squircle(ctx, x, y, s, r) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, s, s, r);
+}
+
+function draw(ctx) {
+  // 底板 + 投影
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = 28; ctx.shadowOffsetY = 12;
+  squircle(ctx, 100, 100, 824, 185);
+  const bg = ctx.createLinearGradient(0, 100, 0, 924);
+  bg.addColorStop(0, '#262a33');
+  bg.addColorStop(1, '#0b0c10');
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  squircle(ctx, 100, 100, 824, 185);
+  ctx.clip();
+  // 表盘中心柔光
+  const glow = ctx.createRadialGradient(C.x, C.y, 0, C.x, C.y, 420);
+  glow.addColorStop(0, 'rgba(118,226,183,0.16)');
+  glow.addColorStop(1, 'rgba(118,226,183,0)');
+  ctx.fillStyle = glow; ctx.fillRect(100, 100, 824, 824);
+  // 顶部高光
+  const hi = ctx.createLinearGradient(0, 100, 0, 420);
+  hi.addColorStop(0, 'rgba(255,255,255,0.07)');
+  hi.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = hi; ctx.fillRect(100, 100, 824, 320);
+  ctx.restore();
+
+  ctx.lineCap = 'round';
+  // 轨道
+  ctx.beginPath();
+  ctx.arc(C.x, C.y, C.r, deg(A0), deg(A0 + SWEEP));
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = C.w; ctx.stroke();
+
+  // 刻度
+  for (let i = 0; i <= 4; i++) {
+    const a = deg(A0 + SWEEP * i / 4), major = true;
+    const r1 = C.r - C.w / 2 - 34, r2 = r1 - (major ? 34 : 18);
+    ctx.beginPath();
+    ctx.moveTo(C.x + r1 * Math.cos(a), C.y + r1 * Math.sin(a));
+    ctx.lineTo(C.x + r2 * Math.cos(a), C.y + r2 * Math.sin(a));
+    ctx.strokeStyle = major ? 'rgba(255,255,255,0.32)' : 'rgba(255,255,255,0.14)';
+    ctx.lineWidth = 14; ctx.stroke();
+  }
+
+  // 彩色读数弧（锥形渐变沿弧走色）
+  const end = A0 + SWEEP * VALUE;
+  const g = ctx.createConicGradient(deg(A0 - 12), C.x, C.y);
+  const stops = ['#5ee6b0', '#3ec8f2', '#7d7bff', '#e46bd8', '#ffb347'];
+  stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1) * (SWEEP * VALUE + 24) / 360, c));
+  g.addColorStop(1, stops[0]);
+  ctx.save();
+  ctx.shadowColor = 'rgba(160,120,255,0.55)'; ctx.shadowBlur = 40;
+  ctx.beginPath();
+  ctx.arc(C.x, C.y, C.r, deg(A0), deg(end));
+  ctx.strokeStyle = g; ctx.lineWidth = C.w; ctx.stroke();
+  ctx.restore();
+
+  // 弧头亮点
+  const hx = C.x + C.r * Math.cos(deg(end)), hy = C.y + C.r * Math.sin(deg(end));
+  ctx.save();
+  ctx.shadowColor = '#ffcf7a'; ctx.shadowBlur = 50;
+  ctx.beginPath(); ctx.arc(hx, hy, 24, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff8ea'; ctx.fill();
+  ctx.restore();
+
+  // 中心迷你折线（吞吐曲线）
+  const pts = [[-120, 40], [-80, 18], [-45, 30], [-10, -8], [25, 6], [60, -34], [118, -52]];
+  ctx.save();
+  ctx.translate(C.x, C.y + 14);
+  ctx.scale(1.25, 1.25);
+  const lg = ctx.createLinearGradient(-120, 0, 120, 0);
+  lg.addColorStop(0, '#5ee6b0'); lg.addColorStop(1, '#ffb347');
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = lg; ctx.lineWidth = 24; ctx.stroke();
+  ctx.restore();
+}
+
+function render(size) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  ctx.scale(size / 1024, size / 1024);
+  draw(ctx);
+  return cv;
+}
+
+// 预览：几个典型尺寸
+for (const s of [512, 256, 128, 64, 32]) {
+  const f = document.createElement('figure');
+  const cv = render(s * 2);
+  cv.style.width = cv.style.height = s + 'px';
+  f.append(cv, Object.assign(document.createElement('figcaption'), { textContent: s + 'pt' }));
+  document.getElementById('row').append(f);
+}
+
+// 导出 iconset 所需全部 PNG 到 out/AppIcon.iconset/ 由 make-icon.sh 处理
+window.exportAll = async () => {
+  const sizes = [16, 32, 64, 128, 256, 512, 1024];
+  for (const s of sizes) {
+    const blob = await new Promise(r => render(s).toBlob(r, 'image/png'));
+    await fetch('/save/icon_' + s + '.png', { method: 'POST', body: blob });
+  }
+  return sizes.length;
+};
+</script>
+</body>
+</html>

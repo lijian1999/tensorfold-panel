@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "state": "idle",
+  "model": null,
+  "tensorfold_version": "0.3.5.0",
+  "context_max": null,
+  "hooks": { "chat": "pending" },
+  "engine_ready": false,
+  "current": null,
+  "last": null,
+  "totals": { "requests": 0, "peak_tps": null, "uptime_s": 8 }
+}

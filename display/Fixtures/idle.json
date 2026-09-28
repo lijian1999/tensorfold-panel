@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "state": "idle",
+  "model": "Qwen3.8-27B-MLX-4bit",
+  "tensorfold_version": "0.3.4.1",
+  "context_max": 262144,
+  "hooks": { "chat": "ok" },
+  "current": null,
+  "last": {
+    "prompt_tokens": 22,
+    "cached_tokens": 0,
+    "completion_tokens": 570,
+    "decode_tps": 58.2,
+    "ttft_s": 0.457,
+    "acceptance_rate": 0.64,
+    "context_used": 592,
+    "finish_reason": "stop"
+  },
+  "totals": { "requests": 42, "peak_tps": 189.3, "uptime_s": 3600 }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "state": "idle",
+  "model": "Qwen3.8-27B-MLX-4bit",
+  "tensorfold_version": "0.3.4.1",
+  "context_max": 262144,
+  "hooks": { "chat": "ok" },
+  "current": null,
+  "last": null,
+  "totals": { "requests": 0, "peak_tps": 0, "uptime_s": 120 }
+}
