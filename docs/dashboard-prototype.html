@@ -197,6 +197,7 @@
   .strip .state-name { color: var(--text); font-size: 14px; font-weight: 650; }
   .strip .strip-right { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
   .strip .strip-right b { color: var(--text-2); font-weight: 600; }
+  .strip .strip-right .warn { color: var(--amber); font-weight: 650; }
   .screen[data-state="offline"] .dot { background: var(--danger); }
   .screen[data-state="idle"] .dot { background: var(--faint); }
   .screen[data-state="prefill"] .dot { background: var(--amber); animation: pulse 1s ease-in-out infinite; }
@@ -330,6 +331,16 @@
     </div>
 
     <div class="group">
+      <div class="group-title">预填充 · 缓存命中（新）</div>
+      <div class="btn-grid" style="grid-template-columns: 1fr;" id="cacheBtns">
+        <button type="button" data-cache-demo="hit">单次 · 长提示，命中 94%</button>
+        <button type="button" data-cache-demo="fresh">单次 · 新对话贴长文，命中 0%</button>
+        <button type="button" data-cache-demo="miss">编程代理一轮 · 缓存未命中</button>
+      </div>
+      <p class="hint">停在预填充里方便看。预计要超过 3 秒的预填充，一开始就切到“已用时”画面，不用再等 3 秒。“编程代理 · 连续 8 次工具调用”模拟里，第 4 次读大文件（正常命中），第 6 次缓存未命中。</p>
+    </div>
+
+    <div class="group">
       <div class="group-title">模拟请求</div>
       <select id="scenario" aria-label="请求类型">
         <option value="auto">自动轮换（散文 / 代码 / 长输出 / 长提示）</option>
@@ -382,7 +393,8 @@
         <li><b>刻度非线性</b>：0 / 25 / 50 / 100 / 150 / 200，低速段拉宽，30–190 tok/s 的常见区间都看得清。</li>
         <li><b>平滑</b>：主数字 = 最近 2.5 秒内产出 token 数 ÷ 2.5 秒（开头不足 2.5 秒时按已用时间算，最少按 0.5 秒）；弧线和数字再以约 0.4 秒时间常数缓动。</li>
         <li><b>峰值</b>：只统计解码开始 1 秒之后的平滑值，避免开头的假尖峰。</li>
-        <li><b>预填充</b>：本版本拿不到进度和提示长度。前 3 秒画面不变，只有状态条显示「预填充中 · 已用时」；超过 3 秒才把主数字换成已用秒数，并提示「提示较长」。圆弧不动，没有扫动。</li>
+        <li><b>预填充</b>：短预填充（预计不到 3 秒）画面不变，只有状态条显示「预填充中 · 已用时」。已用时超过 3 秒，或者一开始就预计要超过 3 秒时，主数字换成已用秒数。圆弧不动，没有扫动。</li>
+        <li><b>缓存命中（新）</b>：预填充一开始就知道命中多少（引擎 <code>add_stream</code> 的 <code>cached_tokens</code>），新算 = 提示 − 命中，预计时间 ≈ 0.21 s + 新算 ×（1.05 ms + 0.016 ms × 平均位置/1K）：越往后注意力越贵，4 万 token 从头算约 57 s。单次请求（未命中只会出现在一轮模式里）：右侧第一格换成「缓存命中 %」，状态条写新算多少、预计几秒。一轮模式：右侧不动，命中率写在状态条。<b>本轮上一个请求的提示 ≥ 4K、这次提示不短于它的一半、命中不到它的一半、新算 ≥ 4K</b> 时判为“缓存未命中”，标琥珀色；新对话本来就没有缓存，代理顺手发的短请求（起标题等）也不标。</li>
         <li><b>上下文</b>：仪表中央下方是上下文占用条（替代原来的小曲线），下面一行写“上下文 已用 / 上限”，占到 80% 变琥珀色、95% 变红色。预填充一开始就有准确的提示长度，解码时加上已输出的 token 实时增长；空闲和完成时显示上次的值。单位并入标题行，例如“解码速度 · tok/s”。</li>
         <li><b>一轮</b>：上一个请求结束后 60 秒内来的请求算同一轮（编程代理的连续工具调用）。本轮请求 ≥ 2 次时右侧固定为 本轮请求 / 累计输出 / 本轮平均，不在解码中显示时主数字是本轮平均（灰色，精确），不再单独显示完成画面；60 秒没有新请求后改叫「上轮」。</li>
         <li><b>解码</b>：右侧为 输出 / 平均 / 峰值。「平均」= 首字之后的输出 tokens ÷ 首字之后经过的时间，和引擎最终 tok/s 同一算法，会逐渐收敛到完成时的精确值。首字时间放在状态条。第 1 层解码中拿不到接受率，所以不显示。</li>
@@ -469,14 +481,23 @@
   const DONE_HOLD = 4;         // 完成态停留（秒）
   const PREFILL_SHORT = 3;     // 预填充前 3 秒不接管画面（秒）
   const ROUND_GAP = 60;        // 上一个请求结束后多久内的新请求算同一轮（秒）
+  // 预填充时间 ≈ A + N × (B + K × 平均位置)，N = 新算 token，平均位置 = 命中 + N/2（注意力越往后越慢）
+  // 本机 TensorFold 日志 148 个请求拟合：2 秒以上的误差中位数 3%，90% 在 7% 以内
+  const PF_A = 0.213, PF_B = 1.048e-3, PF_K = 1.62e-8;
+  const prefillEst = (C, N) => PF_A + N * (PF_B + PF_K * (C + N / 2));
+  const MISS_MIN = 4000;       // “缓存未命中”：上一个请求的提示、这次新算的 token 都至少这么多
 
-  // 实测数据
+  // 实测数据（预填充时间按上面的拟合式对齐）
   const SCEN = {
     prose: { name: '中文散文',    prompt: 22,    cached: 0,     ttft: 0.457, out: 570, final: 58.2,  accept: 61, mem: 21.4 },
     code:  { name: 'Python 代码', prompt: 32,    cached: 0,     ttft: 0.102, out: 600, final: 109.6, accept: 78, mem: 21.5 },
-    long:  { name: '长提示',      prompt: 35012, cached: 21007, ttft: 4.08,  out: 420, final: 44.8,  accept: 66, mem: 24.3 },
+    long:  { name: '长提示',      prompt: 35012, cached: 32768, ttft: 3.8,   out: 420, final: 44.8,  accept: 66, mem: 24.3 },
+    // 新对话贴一篇长文：本来就没有缓存
+    fresh: { name: '新对话长文',  prompt: 12380, cached: 0,     ttft: 14.4,  out: 520, final: 52.6,  accept: 64, mem: 23.1 },
+    // 编程代理一轮里缓存突然未命中：4 万 token 全部重算
+    miss:  { name: '缓存未命中',  prompt: 41230, cached: 0,     ttft: 57.2,  out: 380, final: 42.1,  accept: 63, mem: 25.1 },
     // 演示用：编程代理的长输出，从第 11,200 个 token 起播，只模拟最后 1,200 个，用来看 K 格式
-    longout: { name: '长输出',    prompt: 18420, cached: 16384, ttft: 0.62,  out: 12400, final: 104.3, accept: 74, mem: 22.8, skip: 11200 },
+    longout: { name: '长输出',    prompt: 18420, cached: 18176, ttft: 0.62,  out: 12400, final: 104.3, accept: 74, mem: 22.8, skip: 11200 },
   };
   const ROTATION = ['prose', 'code', 'longout', 'prose', 'code', 'long'];
 
@@ -624,14 +645,16 @@
     setState('prefill');
   }
 
-  // 编程代理的一次工具调用：短预填充、短输出；第 4 次读了大文件，预填充 4.2 秒
+  // 编程代理的一次工具调用：短预填充、短输出；第 4 次读了大文件（新算 3.3K，正常命中），第 6 次缓存未命中（全部重算）
   function agentStep() {
     const a = S.agent;
     const i = a.i++;
     a.nextAt = 0;
+    const prompt = 8000 + i * 900 + (i >= 3 ? 2400 : 0);
+    const cached = i === 3 ? 8000 + 2 * 900 : i === 5 ? 0 : prompt - Math.round(rand(200, 900));
     const sc = {
-      name: '工具调用', prompt: 8000 + i * 900, cached: 7800 + i * 800,
-      ttft: i === 3 ? 4.2 : rand(0.4, 2.4), out: Math.round(rand(40, 260)),
+      name: '工具调用', prompt, cached,
+      ttft: prefillEst(cached, prompt - cached) * rand(0.95, 1.07), out: Math.round(rand(40, 260)),
       final: Math.round(rand(62, 108) * 10) / 10, accept: Math.round(rand(55, 80)), mem: 21.6,
     };
     S.req = newRequest(null, false, sc);
@@ -654,6 +677,7 @@
     R.tokSum += sc.out;
     R.decS += sc.out / sc.final;
     R.lastEnd = t;
+    R.lastPrompt = sc.prompt;   // 下一个请求至少应命中这么多
   }
 
   function beginDecode(t) {
@@ -721,6 +745,23 @@
       S.last.peak = 138;
       setState('done');
     }
+  }
+
+  // 缓存命中演示：停在预填充
+  function cacheDemo(kind) {
+    manualState('idle');
+    const t = now();
+    if (kind === 'hit') {
+      S.req = newRequest('long', true);
+    } else if (kind === 'fresh') {
+      S.req = newRequest('fresh', true);
+    } else {
+      // 编程代理已跑了 5 次，上一次提示 40.1K；这一次本该命中 4 万，结果全部重算
+      S.round = { t0: t - 95, requests: 5, out: 1830, tokSum: 1830, decS: 1830 / 78.4, lastEnd: t - 0.4, lastPrompt: 40120 };
+      S.req = newRequest('miss', true);
+    }
+    S.req.t0 = t;
+    setState('prefill');
   }
 
   // ---------- 格式化 ----------
@@ -814,22 +855,33 @@
         const el = t - r.t0;
         V.stateName = '预填充中';
         rest();
-        if (el < PREFILL_SHORT) {
-          // 前 3 秒：画面保持不变，只有状态条变化
+        // 缓存命中：预填充一开始就有（add_stream 的 cached_tokens）
+        const P = r.sc.prompt, C = r.sc.cached, N = P - C;
+        const hit = P ? Math.round(C / P * 100) : 0;
+        const est = prefillEst(C, N);
+        // 缓存未命中：本轮上一个请求的提示够长，这次提示和它差不多长（同一段对话接着来），
+        // 却连它的一半都没命中，且要新算的不少（排除代理顺手发的短请求，比如起标题）
+        const prev = RM && R.requests >= 1 ? R.lastPrompt : null;
+        const miss = prev != null && prev >= MISS_MIN && P >= prev * 0.5 && C < prev * 0.5 && N >= MISS_MIN;
+        if (el < PREFILL_SHORT && est < PREFILL_SHORT && !miss) {
+          // 短预填充：画面保持不变，只有状态条变化
           V.stripRight = `已用时 <b>${el.toFixed(1)}</b> s`;
           break;
         }
-        // 3 秒以后：主数字换成已用秒数；圆弧不动，小点留在原位
+        // 长预填充（已过 3 秒或预计超过 3 秒）：主数字换成已用秒数；圆弧不动，小点留在原位
         V.muted = false;
-        V.stripRight = '提示较长，可能需要几秒';
+        const eta = `预计约 <b>${Math.ceil(est)}</b> s`;
+        const hitTxt = miss ? '<span class="warn">缓存未命中</span>' : `缓存命中 <b>${hit}%</b>`;
+        V.stripRight = RM ? `${hitTxt} · 新算 <b>${tokFmt(N)}</b> · ${eta}`
+                          : `新算 <b>${tokFmt(N)}</b> tok · ${eta}`;
         V.cap = '已用时'; V.pill = false;
         V.whole = true;
         if (el < 10) { [V.bigInt, V.bigDec] = split1(el); } else { V.bigInt = String(Math.floor(el)); V.bigDec = ''; }
         V.unit = '秒';
         if (!RM) {
-          const grow = r.key === 'long' ? Math.min(1, el / r.sc.ttft) : 0;
+          const grow = Math.min(1, el / r.sc.ttft);
           V.cards = [
-            { l: '输出', v: '—', u: '', f: '', pending: true },
+            { l: '缓存命中', v: String(hit), u: '%', f: `${tokFmt(C)} / ${tokFmt(P)}` },
             { l: '首字', v: '—', u: '', f: '等待首个 token', pending: true },
             memCard(r.memStart + (r.sc.mem - r.memStart) * grow),
           ];
@@ -1092,6 +1144,7 @@
   } else {
     document.querySelectorAll('[data-set-state]').forEach(b => b.addEventListener('click', () => manualState(b.dataset.setState)));
     document.querySelectorAll('[data-set-theme]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.setTheme)));
+    document.querySelectorAll('[data-cache-demo]').forEach(b => b.addEventListener('click', () => cacheDemo(b.dataset.cacheDemo)));
     document.getElementById('simBtn').addEventListener('click', () => startRequest(document.getElementById('scenario').value));
     document.getElementById('loopChk').addEventListener('change', (e) => {
       S.autoLoop = e.target.checked;

@@ -272,6 +272,27 @@ struct MetricsTests {
         #expect(m.model == nil)
         #expect(m.totals == nil)
     }
+
+    @Test("Metrics 解码 current 的 3 个预填充缓存字段；老 fixture 全 nil；3 个新 fixture 都能解码")
+    func prefillCacheDecoding() throws {
+        let m = try decodeFixture("prefill-cache.json")
+        #expect(m.current?.prefillCached == 32768)
+        #expect(m.current?.prefillEstS == 3.797)
+        #expect(m.current?.cacheMiss == false)
+        // 老 fixture 没有新字段，三者都为 nil
+        let old = try decodeFixture("prefill.json")
+        #expect(old.current?.prefillCached == nil)
+        #expect(old.current?.prefillEstS == nil)
+        #expect(old.current?.cacheMiss == nil)
+        let rc = try decodeFixture("round-prefill-cache.json")
+        #expect(rc.current?.prefillCached == 16384)
+        #expect(rc.current?.prefillEstS == 2.921)
+        #expect(rc.current?.cacheMiss == false)
+        let rm = try decodeFixture("round-prefill-miss.json")
+        #expect(rm.current?.prefillCached == 0)
+        #expect(rm.current?.prefillEstS == 57.191)
+        #expect(rm.current?.cacheMiss == true)
+    }
 }
 
 @Suite("PanelViewModel.make：状态 → 画面")
@@ -587,6 +608,177 @@ struct PanelViewModelTests {
         tracker.recordSuccess(m, at: 10)
         let v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
         #expect(v.context == nil)
+    }
+}
+
+@Suite("StripSegment：bold / warn")
+struct StripSegmentTests {
+    @Test("默认 warn 为 false，参与相等比较")
+    func warnDefault() {
+        #expect(StripSegment("a") == StripSegment("a", bold: false, warn: false))
+        #expect(StripSegment("a", warn: true) != StripSegment("a"))
+    }
+}
+
+@Suite("预填充：缓存命中 / 新算 token 数 / 预计时间")
+struct PrefillCacheTests {
+    let mem: (usedGB: Double, totalGB: Double) = (21.4, 64)
+
+    /// 成功读到指定 fixture，在线
+    func online(_ fixture: String, at t: Double) throws -> ConnectionTracker {
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture(fixture), at: t)
+        return tracker
+    }
+
+    @Test("prefill-cache（单请求，已用 1.0 但预计 3.797 ≥ 3 → 长）：新算 + 预计 + 缓存命中卡")
+    func prefillCacheSingle() throws {
+        let v = PanelViewModel.make(tracker: try online("prefill-cache.json", at: 10), now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+        #expect(v.bigInt == "1")
+        #expect(v.bigDec == ".0")
+        #expect(!v.muted)
+        #expect(v.arc == .rest)
+        // 新算 35012 − 32768 = 2244 → 2.2K；预计 3.797 → 4（向上取整）
+        #expect(v.stripRight == [
+            StripSegment("新算 "),
+            StripSegment("2.2K", bold: true),
+            StripSegment(" tok"),
+            StripSegment(" · 预计约 "),
+            StripSegment("4", bold: true),
+            StripSegment(" s"),
+        ])
+        #expect(v.cards[0] == Card(label: "缓存命中", value: "94", unit: "%", foot: "32.8K / 35.0K"))
+        #expect((v.cards[1].label, v.cards[1].pending, v.cards[1].foot) == ("首字", true, "等待首个 token"))
+        #expect(v.cards[2].label == "内存")
+    }
+
+    @Test("round-prefill-cache（一轮，已用 4.4）：缓存命中 89% + 新算 2.0K + 预计 3 s；卡片 = 一轮卡片")
+    func roundPrefillCache() throws {
+        let v = PanelViewModel.make(tracker: try online("round-prefill-cache.json", at: 10), now: 10, memory: mem)
+        // 16384 / 18420 → 88.95% → 89%；新算 18420 − 16384 = 2036 → 2.0K；预计 2.921 → 3
+        #expect(v.stripRight == [
+            StripSegment("缓存命中 "),
+            StripSegment("89%", bold: true),
+            StripSegment(" · 新算 "),
+            StripSegment("2.0K", bold: true),
+            StripSegment(" · 预计约 "),
+            StripSegment("3", bold: true),
+            StripSegment(" s"),
+        ])
+        // 一轮卡片和 round-prefill-long 生成的完全相同
+        let long = PanelViewModel.make(tracker: try online("round-prefill-long.json", at: 10), now: 10, memory: mem)
+        #expect(v.cards == long.cards)
+    }
+
+    @Test("round-prefill-miss（一轮，已用 1.0，缓存未命中 → 长）：琥珀「缓存未命中」段")
+    func roundPrefillMiss() throws {
+        let v = PanelViewModel.make(tracker: try online("round-prefill-miss.json", at: 10), now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+        // 未命中 → 命中率不算，直接显示琥珀「缓存未命中」；新算 41230 → 41.2K；预计 57.191 → 58
+        #expect(v.stripRight == [
+            StripSegment("缓存未命中", warn: true),
+            StripSegment(" · 新算 "),
+            StripSegment("41.2K", bold: true),
+            StripSegment(" · 预计约 "),
+            StripSegment("58", bold: true),
+            StripSegment(" s"),
+        ])
+        #expect(v.cards[0].label == "本轮请求")
+    }
+
+    @Test("提前切换边界：预计 2.99 短 / 3.0 长 / 预计 nil 但缓存未命中也长")
+    func prefillEstBoundary() throws {
+        var m = try decodeFixture("prefill-cache.json")
+        m.current?.elapsedS = 1.0
+        var tracker = ConnectionTracker(bootTime: 0)
+        m.current?.prefillEstS = 2.99
+        m.current?.cacheMiss = false
+        tracker.recordSuccess(m, at: 10)
+        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cap == "上次平均")
+        #expect(v.stripRight == [StripSegment("已用时 "), StripSegment("1.0", bold: true), StripSegment(" s")])
+        m.current?.prefillEstS = 3.0
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+        m.current?.prefillEstS = nil
+        m.current?.cacheMiss = true
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+    }
+
+    @Test("prefill_est_s 为 nil：不带预计段，卡片仍是缓存命中卡")
+    func prefillEstNil() throws {
+        var m = try decodeFixture("prefill-cache.json")
+        m.current?.elapsedS = 4.0
+        m.current?.prefillEstS = nil
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        let v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.stripRight == [
+            StripSegment("新算 "),
+            StripSegment("2.2K", bold: true),
+            StripSegment(" tok"),
+        ])
+        #expect(v.cards[0].label == "缓存命中")
+    }
+
+    @Test("拿不到缓存信息时退回原画面（cached nil / prompt nil / prompt 0）")
+    func prefillCacheFallback() throws {
+        // prefill_cached 为 nil（prompt 35012、已用 4.0）→ 退回
+        var m = try decodeFixture("prefill-cache.json")
+        m.current?.elapsedS = 4.0
+        m.current?.prefillCached = nil
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.stripRight == [StripSegment("提示较长，可能需要几秒")])
+        #expect(v.cards[0].label == "输出")
+        // prompt_tokens 为 nil → 同样退回
+        m = try decodeFixture("prefill-cache.json")
+        m.current?.promptTokens = nil
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.stripRight == [StripSegment("提示较长，可能需要几秒")])
+        #expect(v.cards[0].label == "输出")
+        // prompt_tokens 为 0 → 同样退回
+        m = try decodeFixture("prefill-cache.json")
+        m.current?.promptTokens = 0
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.stripRight == [StripSegment("提示较长，可能需要几秒")])
+        #expect(v.cards[0].label == "输出")
+    }
+
+    @Test("命中率取整和夹紧：2/3 → 67；cached 大于 prompt → 100、新算 0")
+    func hitRoundingClamp() throws {
+        var m = try decodeFixture("prefill-cache.json")
+        m.current?.promptTokens = 3
+        m.current?.prefillCached = 2
+        m.current?.prefillEstS = 5.0
+        m.current?.elapsedS = 1.0
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cards[0].value == "67")
+        // cached 大于 prompt → 命中 100，新算 0
+        m = try decodeFixture("prefill-cache.json")
+        m.current?.promptTokens = 100
+        m.current?.prefillCached = 200
+        m.current?.elapsedS = 4.0
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cards[0].value == "100")
+        #expect(v.stripRight == [
+            StripSegment("新算 "),
+            StripSegment("0", bold: true),
+            StripSegment(" tok"),
+            StripSegment(" · 预计约 "),
+            StripSegment("4", bold: true),
+            StripSegment(" s"),
+        ])
     }
 }
 

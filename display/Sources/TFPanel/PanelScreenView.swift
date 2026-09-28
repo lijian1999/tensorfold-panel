@@ -78,8 +78,8 @@ struct StripView: View {
         var a = AttributedString()
         for seg in model.stripRight {
             var piece = AttributedString(seg.text)
-            piece.font = .system(size: 13 * s, weight: seg.bold ? .semibold : .regular).monospacedDigit()
-            piece.foregroundColor = seg.bold ? Theme.text2 : Theme.muted
+            piece.font = .system(size: 13 * s, weight: (seg.bold || seg.warn) ? .semibold : .regular).monospacedDigit()
+            piece.foregroundColor = seg.warn ? Theme.amber : (seg.bold ? Theme.text2 : Theme.muted)
             a += piece
         }
         return Text(a).lineLimit(1).truncationMode(.tail)
@@ -302,8 +302,8 @@ struct CenterView: View {
         var text = AttributedString()
         for seg in ctx.segments {
             var piece = AttributedString(seg.text)
-            piece.font = .system(size: 12 * s, weight: seg.bold ? .semibold : .regular).monospacedDigit()
-            piece.foregroundColor = seg.bold ? Theme.text2 : Theme.muted
+            piece.font = .system(size: 12 * s, weight: (seg.bold || seg.warn) ? .semibold : .regular).monospacedDigit()
+            piece.foregroundColor = seg.warn ? Theme.amber : (seg.bold ? Theme.text2 : Theme.muted)
             text += piece
         }
         return ZStack {

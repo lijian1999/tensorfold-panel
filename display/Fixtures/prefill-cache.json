@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "state": "prefill",
+  "model": "Qwen3.8-27B-MLX-4bit",
+  "tensorfold_version": "0.3.4.1",
+  "context_max": 262144,
+  "hooks": { "chat": "ok" },
+  "current": {
+    "elapsed_s": 1.0,
+    "ttft_s": null,
+    "output_tokens": null,
+    "decode_tps": null,
+    "decode_tps_peak": null,
+    "prompt_tokens": 35012,
+    "prefill_cached": 32768,
+    "prefill_est_s": 3.797,
+    "cache_miss": false
+  },
+  "last": {
+    "prompt_tokens": 22,
+    "cached_tokens": 0,
+    "completion_tokens": 570,
+    "decode_tps": 58.2,
+    "ttft_s": 0.457,
+    "acceptance_rate": 0.64,
+    "context_used": 592,
+    "finish_reason": "stop"
+  },
+  "totals": { "requests": 42, "peak_tps": 189.3, "uptime_s": 3600 }
+}

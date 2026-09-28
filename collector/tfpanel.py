@@ -33,6 +33,88 @@ ROUND_GAP_DEFAULT_S = 60.0
 # 记住本线程正在 chat() 里的请求记录，供 render 包装定位当前请求
 _TLS = threading.local()
 
+# 预填充时间模型：seconds ≈ a + b1*(new/1000) + b2*new*(cached+new/2)/1e6
+PREFILL_DEFAULT_COEFS = (0.213, 1.048, 0.0162)   # 本机日志 148 个请求拟合
+PREFILL_MAX_SAMPLES = 500
+PREFILL_MIN_SAMPLES = 30
+PREFILL_MIN_SPAN = 4000        # 样本里至少有一个新算 ≥ 这么多才重新拟合
+
+
+# ---------------------------------------------------------------- 预填充时间模型
+
+
+class PrefillModel:
+    """纯预填充时间模型：按新算 token 数和命中位置线性估算，自动用最近请求校准。"""
+
+    def __init__(self):
+        self.coefs = PREFILL_DEFAULT_COEFS          # (a, b1, b2)
+        self._samples = deque(maxlen=PREFILL_MAX_SAMPLES)
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def features(cached, new):
+        """特征向量：(1, new/1000, new*(cached+new/2)/1e6)。"""
+        return (1.0, new / 1000.0, new * (cached + new / 2.0) / 1e6)
+
+    @staticmethod
+    def _finite(v):
+        return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v))
+
+    def estimate(self, cached, new):
+        """预计纯预填充秒数（round 到 3 位）。"""
+        with self._lock:
+            a, b1, b2 = self.coefs
+        f0, f1, f2 = self.features(cached, new)
+        return round(float(a * f0 + b1 * f1 + b2 * f2), 3)
+
+    def add_sample(self, cached, new, seconds):
+        """记录一次完成的请求；非法样本（越界、非有限数、bool）不记。"""
+        if not all(self._finite(v) for v in (cached, new, seconds)):
+            return
+        if cached < 0 or new < 1 or seconds <= 0:
+            return
+        with self._lock:
+            self._samples.append((cached, new, seconds))
+            self._refit()
+
+    def _refit(self):
+        """按最小二乘重新拟合系数（调用方持锁）；样本不足或解不合理时不变。"""
+        samples = list(self._samples)
+        if len(samples) < PREFILL_MIN_SAMPLES:
+            return
+        if all(new < PREFILL_MIN_SPAN for _, new, _ in samples):
+            return
+        # 正规方程 XᵀX·β = Xᵀy
+        ata = [[0.0] * 3 for _ in range(3)]
+        aty = [0.0, 0.0, 0.0]
+        for cached, new, seconds in samples:
+            row = self.features(cached, new)
+            for i in range(3):
+                aty[i] += row[i] * seconds
+                for j in range(3):
+                    ata[i][j] += row[i] * row[j]
+        # 带部分主元的高斯消元
+        mat = [row[:] + [aty[i]] for i, row in enumerate(ata)]
+        for col in range(3):
+            pivot = max(range(col, 3), key=lambda r: abs(mat[r][col]))
+            if abs(mat[pivot][col]) < 1e-12:
+                return  # 奇异，系数不变
+            if pivot != col:
+                mat[col], mat[pivot] = mat[pivot], mat[col]
+            for r in range(col + 1, 3):
+                f = mat[r][col] / mat[col][col]
+                for k in range(col, 4):
+                    mat[r][k] -= f * mat[col][k]
+        beta = [0.0, 0.0, 0.0]
+        for i in range(2, -1, -1):
+            beta[i] = (mat[i][3]
+                       - sum(mat[i][j] * beta[j] for j in range(i + 1, 3))) \
+                / mat[i][i]
+        a, b1, b2 = beta
+        if all(self._finite(v) for v in beta) and a >= 0 and b1 > 0 and b2 >= 0:
+            self.coefs = (a, b1, b2)
+
 
 # ---------------------------------------------------------------- 增量文字
 
@@ -67,7 +149,8 @@ class _Request:
 
     __slots__ = ("start_time", "streaming", "deltas", "consumed",
                  "total_tokens", "events", "first_delta_time", "peak",
-                 "prompt_tokens", "job", "job_seen", "first_token_time")
+                 "prompt_tokens", "job", "job_seen", "first_token_time",
+                 "prefill_cached", "prefill_est_s", "cache_miss")
 
     def __init__(self, start_time, streaming):
         self.start_time = start_time      # clock 时间
@@ -82,6 +165,9 @@ class _Request:
         self.job = None                   # 最近一次 attach 的调度器 job
         self.job_seen = 0                 # 已经计入的引擎 token 数
         self.first_token_time = None      # 换算线程第一次看到引擎 token 数 > 0 的时刻
+        self.prefill_cached = None        # 预填充开始时的缓存命中 token 数
+        self.prefill_est_s = None         # 预计纯预填充秒数
+        self.cache_miss = False           # 是否判定缓存未命中
 
 
 def _new_round(started):
@@ -117,6 +203,7 @@ class Collector:
         self.context_window = 0
         self.tensorfold_version = None
         self.hooks = {"chat": "missing"}
+        self.prefill_model = PrefillModel()   # 预填充时间模型（自动校准）
         self._tokenizer = None
         self._tokenizer_lock = None
         self._wall_start = time.time()    # 真实墙钟，uptime 用
@@ -183,6 +270,67 @@ class Collector:
             if req.prompt_tokens is None:
                 req.prompt_tokens = n
 
+    def prefill_begin(self, stream, cached):
+        """预填充开始（add_stream 包装在调度线程里调用）：
+        记下缓存命中、预计纯预填充秒数，并判定是否缓存未命中。
+
+        用 stream 对象找请求：调度器调用 add_stream 前刚把 job.stream 设为
+        同一个 stream，而 Scheduler.submit 包装已把 job 记到请求上。
+        """
+        req = None
+        last = None
+        rnd = None
+        prompt_tokens = None
+        with self._lock:
+            for r in self._requests.values():
+                if r.job is not None \
+                        and getattr(r.job, "stream", None) is stream:
+                    req = r
+                    break
+            if req is None:
+                return  # 预热、后台请求等：不属于任何进行中的请求
+            last = self.last
+            rnd = None if self._round is None else dict(self._round)
+            prompt_tokens = req.prompt_tokens
+        # 提示总长：优先 stream.prompt_ids，异常/非正整数时用 render 记的
+        total = None
+        try:
+            n = len(stream.prompt_ids)
+        except Exception:
+            n = None
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            total = n
+        if total is None and isinstance(prompt_tokens, int) \
+                and not isinstance(prompt_tokens, bool) and prompt_tokens > 0:
+            total = prompt_tokens
+        if total is not None:
+            self.set_prompt_tokens(req, total)
+        # cached：bool/非 int 当 0，负数当 0，再夹到 ≤ total
+        if isinstance(cached, bool) or not isinstance(cached, int) \
+                or cached < 0:
+            cached = 0
+        if total is not None:
+            cached = min(cached, total)
+            est = self.prefill_model.estimate(cached, total - cached)
+        else:
+            est = None
+        # 缓存未命中：和本轮上一个请求比较
+        M = PREFILL_MIN_SPAN
+        miss = False
+        if total is not None and rnd is not None and rnd["requests"] >= 1:
+            prev = last.get("prompt_tokens") if last is not None else None
+            if isinstance(prev, int) and not isinstance(prev, bool) \
+                    and prev >= M \
+                    and total >= prev * 0.5 \
+                    and cached < prev * 0.5 \
+                    and total - cached >= M:
+                miss = True
+        with self._lock:
+            # 同一请求再次进入（抢占重跑）时直接覆盖
+            req.prefill_cached = cached
+            req.prefill_est_s = est
+            req.cache_miss = miss
+
     def fail(self, req):
         """请求抛异常：直接丢弃，不更新 last、不进入 done，只刷新 last_activity。"""
         now = self.clock()
@@ -204,6 +352,34 @@ class Collector:
             self.last_activity = now
             if self._round is not None:
                 self._accumulate_round(reply)
+        self._record_prefill_sample(req, reply)
+
+    def _record_prefill_sample(self, req, reply):
+        """尽力把一个完成的请求记为预填充样本（任何异常都吞掉）。"""
+        try:
+            job = req.job
+            if job is None:
+                return
+            started = getattr(job, "started_at", 0.0)
+            prefilled = getattr(job, "prefilled_at", 0.0)
+            if not all(PrefillModel._finite(v)
+                       for v in (started, prefilled)):
+                return
+            if started <= 0 or prefilled <= 0 or prefilled <= started:
+                return
+            if not isinstance(reply, dict):
+                return
+            prompt = reply.get("prompt_tokens")
+            cached = reply.get("cached_tokens")
+            if not (isinstance(prompt, int) and not isinstance(prompt, bool)
+                    and isinstance(cached, int) and not isinstance(cached, bool)):
+                return
+            if not 0 <= cached < prompt:
+                return
+            self.prefill_model.add_sample(cached, prompt - cached,
+                                          prefilled - started)
+        except Exception:
+            pass
 
     def _accumulate_round(self, reply):
         """按成绩单更新本轮统计（调用方必须持 self._lock）。"""
@@ -400,6 +576,9 @@ class Collector:
             with self._lock:
                 output_tokens = req.total_tokens  # 换算线程会同时累加，在锁内读
                 prompt_tokens = req.prompt_tokens  # 换算线程可能同时写，在锁内读
+                prefill_cached = req.prefill_cached
+                prefill_est_s = req.prefill_est_s
+                cache_miss = req.cache_miss
             current = {
                 "elapsed_s": round(now - req.start_time, 3),
                 "ttft_s": None if ttft is None else round(ttft, 3),
@@ -408,6 +587,9 @@ class Collector:
                 "decode_tps": round(tps, 3),
                 "decode_tps_peak": round(peak, 3),
                 "decode_tps_avg": None if avg is None else round(avg, 3),
+                "prefill_cached": prefill_cached,
+                "prefill_est_s": prefill_est_s,
+                "cache_miss": cache_miss,
             }
         with self._lock:
             last = self.last
@@ -640,6 +822,34 @@ def patch_chat_app(module, collector, hooks):
     except Exception:
         hooks["tokens"] = "missing"
 
+    # 尽力包装 LaneEngine.add_stream：调度线程在预填充开始时调用它，读参数
+    # 拿缓存命中、算预计时间；只读参数，任何异常都吞掉，绝不影响调度
+    try:
+        lane_cls = getattr(module, "LaneEngine", None)
+        add_stream = (getattr(lane_cls, "add_stream", None)
+                      if lane_cls is not None else None)
+        if not callable(add_stream):
+            hooks["prefill"] = "missing"
+        else:
+            original_add_stream = add_stream
+
+            @functools.wraps(original_add_stream)
+            def wrapped_add_stream(self, *args, **kwargs):
+                try:
+                    stream = args[0] if args else kwargs.get("stream")
+                    cached = (kwargs.get("cached_tokens", 0)
+                              if kwargs.get("cache") is not None else 0)
+                    if stream is not None:
+                        collector.prefill_begin(stream, cached)
+                except Exception:
+                    pass  # 外挂不能影响调度
+                return original_add_stream(self, *args, **kwargs)  # 参数/返回值/异常原样
+
+            lane_cls.add_stream = wrapped_add_stream
+            hooks["prefill"] = "ok"
+    except Exception:
+        hooks["prefill"] = "missing"
+
     # 尽力包装 __init__：构造完成就记下实例；失败就退回在第一次 chat() 时再记
     try:
         init = getattr(app_class, "__init__", None)
@@ -666,6 +876,7 @@ def run_self_check(module, collector, hooks, version=None, force_fail=False):
         hooks["chat"] = "missing"
         hooks["render"] = "missing"
         hooks["tokens"] = "missing"
+        hooks["prefill"] = "missing"
         print(f"[tfpanel] 指标未挂载：TensorFold {version or '未知版本'} 的 ChatApp.chat "
               f"已变化，副屏将显示“指标不可用”", file=sys.stderr)
         return False
@@ -821,7 +1032,8 @@ def main(argv):
     collector.tensorfold_version = _tensorfold_version()
     force_fail = os.environ.get("TFPANEL_FORCE_HOOK_FAIL") == "1"
     state = decide_initial_hook_state()
-    hooks = {"chat": state, "render": state, "tokens": state}
+    hooks = {"chat": state, "render": state, "tokens": state,
+             "prefill": state}
     collector.hooks = hooks
 
     def on_app_module(module):

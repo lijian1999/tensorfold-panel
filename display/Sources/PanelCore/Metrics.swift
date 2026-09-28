@@ -33,6 +33,12 @@ public struct Metrics: Decodable, Sendable {
         public var decodeTpsAvg: Double?
         /// 本次提示 token 数（精确，拿不到时为 nil）
         public var promptTokens: Int?
+        /// 预填充开始时的缓存命中 token 数（拿不到时为 nil）
+        public var prefillCached: Int?
+        /// 预计纯预填充秒数（拿不到时为 nil）
+        public var prefillEstS: Double?
+        /// 是否判定为缓存未命中
+        public var cacheMiss: Bool?
 
         public init(
             elapsedS: Double? = nil,
@@ -41,7 +47,10 @@ public struct Metrics: Decodable, Sendable {
             decodeTps: Double? = nil,
             decodeTpsPeak: Double? = nil,
             decodeTpsAvg: Double? = nil,
-            promptTokens: Int? = nil
+            promptTokens: Int? = nil,
+            prefillCached: Int? = nil,
+            prefillEstS: Double? = nil,
+            cacheMiss: Bool? = nil
         ) {
             self.elapsedS = elapsedS
             self.ttftS = ttftS
@@ -50,6 +59,9 @@ public struct Metrics: Decodable, Sendable {
             self.decodeTpsPeak = decodeTpsPeak
             self.decodeTpsAvg = decodeTpsAvg
             self.promptTokens = promptTokens
+            self.prefillCached = prefillCached
+            self.prefillEstS = prefillEstS
+            self.cacheMiss = cacheMiss
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -60,6 +72,9 @@ public struct Metrics: Decodable, Sendable {
             case decodeTpsPeak = "decode_tps_peak"
             case decodeTpsAvg = "decode_tps_avg"
             case promptTokens = "prompt_tokens"
+            case prefillCached = "prefill_cached"
+            case prefillEstS = "prefill_est_s"
+            case cacheMiss = "cache_miss"
         }
     }
 

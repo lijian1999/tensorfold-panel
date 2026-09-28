@@ -148,6 +148,8 @@ class FakeJob:
 
     def __init__(self):
         self.stream = None
+        self.started_at = 0.0
+        self.prefilled_at = 0.0
 
 
 class BrokenStream:
@@ -1086,7 +1088,7 @@ class TestPromptTokens(unittest.TestCase):
         module = fake_module(app_cls)
         self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
         self.assertEqual(hooks, {"chat": "ok", "render": "missing",
-                                 "tokens": "missing"})
+                                 "tokens": "missing", "prefill": "missing"})
         self.assertEqual(app_cls().chat([{"role": "user", "content": "hi"}]),
                          {"ok": 1})
         self.assertIsNone(collector.last["prompt_tokens"] if collector.last else None)
@@ -1448,6 +1450,450 @@ class TestEngineTokens(unittest.TestCase):
         self.assertEqual(out, {"ok": 1})
         self.assertEqual(captured["snap"]["current"]["output_tokens"], 0)
         self.assertIsNotNone(self.collector.last)  # 请求照常完成
+
+
+# ---------------------------------------------------------------- 假 LaneEngine
+
+
+class FakeLaneEngine:
+    """假 LaneEngine：add_stream 记下调用参数，可配置返回值和异常。"""
+
+    def __init__(self):
+        self.received = None
+        self.exc = None
+        self.ret = "lane-ret"
+
+    def add_stream(self, stream, *, cache=None, cached_tokens=0,
+                   checkpoints_at=()):
+        self.received = (stream, cache, cached_tokens, checkpoints_at)
+        if self.exc is not None:
+            raise self.exc
+        return self.ret
+
+
+class PrefillStream:
+    """带 prompt_ids 列表的假 stream。"""
+
+    def __init__(self, n):
+        self.prompt_ids = list(range(n))
+        self.emitted = []
+
+
+class BrokenPromptStream:
+    """访问 prompt_ids 会抛异常的假 stream。"""
+
+    @property
+    def prompt_ids(self):
+        raise RuntimeError("prompt_ids boom")
+
+    emitted = []
+
+
+class TestPrefillCache(unittest.TestCase):
+    """G1：预填充开始时（LaneEngine.add_stream 包装）拿缓存命中、预计时间、
+    缓存未命中判定。"""
+
+    def _setup(self, render_len=None, with_lane=True):
+        self.clock = FakeClock(0.0)
+        self.collector = make_collector(self.clock)
+        self.hooks = {"chat": "missing", "render": "missing",
+                      "tokens": "missing", "prefill": "missing"}
+        if render_len is None:
+            app_cls = make_scheduler_app_cls()
+        else:
+
+            class App(FakeChatApp):
+                def __init__(self, tokenizer=None, served_name="fake-model",
+                             context_window=4096):
+                    FakeChatApp.__init__(self, tokenizer=tokenizer,
+                                         served_name=served_name,
+                                         context_window=context_window)
+                    self.scheduler = FakeScheduler()
+
+                def render(self, messages, tools=None, thinking=None):
+                    return (list(range(render_len)), 0)
+
+                def chat(self, messages, *, on_delta=None, mid=None):
+                    self.render(messages)
+                    self.job = FakeJob()
+                    self.scheduler.submit(self.job)
+                    if mid is not None:
+                        mid(self, self.job)
+                    return {"ok": 1}
+
+            app_cls = App
+        module = fake_module(app_cls)
+        module.Scheduler = FakeScheduler
+        if with_lane:
+            module.LaneEngine = FakeLaneEngine
+        self.assertTrue(tfpanel.patch_chat_app(module, self.collector,
+                                               self.hooks))
+        self.app_cls = app_cls
+        return app_cls
+
+    def _run(self, prompt_len, cache, cached_tokens, stream=None, mid_extra=None):
+        """走完整 chat 流程：mid 里设 job.stream，另起线程调 add_stream 后
+        join，再取 snapshot 的 current。mid_extra 可先做一些事（比如设 prompt）。"""
+        app = self.app_cls()
+        engine = FakeLaneEngine()
+        if stream is None:
+            stream = PrefillStream(prompt_len)
+        captured = {}
+
+        def mid(app_, job):
+            if mid_extra is not None:
+                mid_extra(app_, job)
+            job.stream = stream
+            t = threading.Thread(target=lambda: engine.add_stream(
+                stream, cache=cache, cached_tokens=cached_tokens))
+            t.start()
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
+            captured["cur"] = self.collector.snapshot()["current"]
+
+        app.chat([{"role": "user"}], mid=mid)
+        return captured["cur"]
+
+    def test_add_stream_passthrough_and_hooks_ok(self):
+        """1. 打补丁后 hooks.prefill == "ok"；add_stream 的位置/关键字参数原样
+        传入原方法，返回值同一个对象，原方法抛出的异常原样抛出（同一对象）。"""
+        self._setup()
+        self.assertEqual(self.hooks["prefill"], "ok")
+        eng = FakeLaneEngine()
+        stream = PrefillStream(10)
+        cache = object()
+        cps = (1, 2)
+        self.assertEqual(eng.add_stream(stream, cache=cache, cached_tokens=5,
+                                         checkpoints_at=cps), "lane-ret")
+        self.assertEqual(eng.received, (stream, cache, 5, cps))
+        # 位置参数也能原样传入
+        self.assertEqual(eng.add_stream(stream), "lane-ret")
+        self.assertEqual(eng.received, (stream, None, 0, ()))
+        # 返回值是同一个对象
+        sentinel = object()
+        eng.ret = sentinel
+        self.assertIs(eng.add_stream(stream), sentinel)
+        # 异常原样抛出（同一对象）
+        boom = ValueError("add_stream boom")
+        eng.exc = boom
+        with self.assertRaises(ValueError) as ctx:
+            eng.add_stream(stream)
+        self.assertIs(ctx.exception, boom)
+
+    def test_cache_hit_records_cached_and_est(self):
+        """2. 提示 35012、cache 非 None、cached_tokens=32768。
+        → prefill_cached == 32768，prefill_est_s == 3.797，cache_miss 为 False。"""
+        self._setup()
+        cur = self._run(35012, cache=object(), cached_tokens=32768)
+        self.assertEqual(cur["prefill_cached"], 32768)
+        self.assertEqual(cur["prefill_est_s"], 3.797)
+        self.assertIs(cur["cache_miss"], False)
+
+    def test_no_cache_treats_zero(self):
+        """3. cache=None 时命中当 0（cached_tokens=5000 被忽略）。"""
+        self._setup()
+        cur = self._run(35012, cache=None, cached_tokens=5000)
+        self.assertEqual(cur["prefill_cached"], 0)
+        self.assertEqual(cur["prefill_est_s"],
+                         tfpanel.PrefillModel().estimate(0, 35012))
+
+    def test_full_miss_estimate(self):
+        """4. 提示 41230、命中 0 → prefill_est_s == 57.191。"""
+        self._setup()
+        cur = self._run(41230, cache=object(), cached_tokens=0)
+        self.assertEqual(cur["prefill_cached"], 0)
+        self.assertEqual(cur["prefill_est_s"], 57.191)
+
+    def test_stream_not_matching_request_is_ignored(self):
+        """5. stream 不属于任何进行中的请求 → 不报错、不影响任何请求。"""
+        self._setup()
+        engine = FakeLaneEngine()
+        stream = PrefillStream(100)
+        # a：没有任何进行中的请求（预热/后台请求）
+        t = threading.Thread(target=lambda: engine.add_stream(stream))
+        t.start()
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive())
+        self.assertIsNone(self.collector.current_request())
+        self.assertIsNone(self.collector.snapshot()["current"])
+        # b：有进行中的请求，但 job.stream 是另一个对象
+        req = self.collector.begin()
+        other = PrefillStream(50)
+        t = threading.Thread(target=lambda: engine.add_stream(other))
+        t.start()
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive())
+        cur = self.collector.snapshot()["current"]
+        self.assertIsNone(cur["prefill_cached"])
+        self.assertIsNone(cur["prefill_est_s"])
+        self.assertIs(cur["cache_miss"], False)
+        self.assertIsNone(req.prefill_cached)
+        self.assertIsNone(req.prefill_est_s)
+        self.assertIs(req.cache_miss, False)
+        self.collector.fail(req)
+
+    def test_prompt_tokens_from_stream_or_render(self):
+        """6. render 没记提示长度（prompt_tokens 为 None）→ 用
+        len(stream.prompt_ids)；render 已记 100 → 保持 100。"""
+        self._setup()  # 没有 render 方法：prompt_tokens 保持 None
+        cur = self._run(35012, cache=object(), cached_tokens=32768)
+        self.assertEqual(cur["prompt_tokens"], 35012)
+        self._setup(render_len=100)
+        cur = self._run(35012, cache=object(), cached_tokens=32768)
+        self.assertEqual(cur["prompt_tokens"], 100)
+
+    def test_prompt_ids_error_falls_back(self):
+        """7. stream.prompt_ids 访问抛异常 → 用 req.prompt_tokens 算；
+        两者都没有 → prefill_cached 照记，est 为 None，miss 为 False，不报错。"""
+        self._setup()
+
+        def mid_set_prompt(app_, job):
+            self.collector.set_prompt_tokens(tfpanel._TLS.req, 35012)
+
+        # a：prompt_ids 抛异常，但 render 已记 35012 → 正常估算
+        cur = self._run(35012, cache=object(), cached_tokens=32768,
+                        stream=BrokenPromptStream(), mid_extra=mid_set_prompt)
+        self.assertEqual(cur["prefill_cached"], 32768)
+        self.assertEqual(cur["prefill_est_s"], 3.797)
+        self.assertIs(cur["cache_miss"], False)
+        # b：两者都没有 → prefill_cached 照记、est 为 None、miss 为 False
+        self._setup()
+        cur = self._run(35012, cache=object(), cached_tokens=32768,
+                        stream=BrokenPromptStream())
+        self.assertEqual(cur["prefill_cached"], 32768)
+        self.assertIsNone(cur["prefill_est_s"])
+        self.assertIs(cur["cache_miss"], False)
+
+    def test_cached_clamped_and_sanitized(self):
+        """8. cached 大于提示长度 → 夹到提示长度；负数或 True → 当 0。"""
+        self._setup()
+        cur = self._run(35012, cache=object(), cached_tokens=50000)
+        self.assertEqual(cur["prefill_cached"], 35012)
+        self.assertEqual(cur["prefill_est_s"],
+                         tfpanel.PrefillModel().estimate(35012, 0))
+        for bad in (-5, True):
+            with self.subTest(cached=bad):
+                self._setup()
+                cur = self._run(35012, cache=object(), cached_tokens=bad)
+                self.assertEqual(cur["prefill_cached"], 0)
+                self.assertEqual(cur["prefill_est_s"],
+                                 tfpanel.PrefillModel().estimate(0, 35012))
+
+    def _miss_case(self, prev_prompt, prompt_len, cached_tokens, gap_s):
+        """上一个请求真实 begin/finish（reply 给 prompt_tokens），
+        gap_s 后再开始这次请求，返回这次 current 里的 cache_miss。"""
+        clock = FakeClock(0.0)
+        collector = make_collector(clock)
+        hooks = {"chat": "missing", "render": "missing",
+                 "tokens": "missing", "prefill": "missing"}
+        app_cls = make_scheduler_app_cls()
+        module = fake_module(app_cls)
+        module.Scheduler = FakeScheduler
+        module.LaneEngine = FakeLaneEngine
+        self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
+        prev = collector.begin()
+        collector.finish(prev, {"prompt_tokens": prev_prompt,
+                                "completion_tokens": 3})
+        if gap_s:
+            clock.advance(gap_s)
+        stream = PrefillStream(prompt_len)
+        engine = FakeLaneEngine()
+        captured = {}
+
+        def mid(app_, job):
+            job.stream = stream
+            t = threading.Thread(target=lambda: engine.add_stream(
+                stream, cache=object(), cached_tokens=cached_tokens))
+            t.start()
+            t.join(timeout=5)
+            captured["cur"] = collector.snapshot()["current"]
+
+        app_cls().chat([{"role": "user"}], mid=mid)
+        return captured["cur"]["cache_miss"]
+
+    def test_cache_miss_rules(self):
+        """9. 缓存未命中判定的全部规则（上一轮请求真实 begin/finish 再测这次）。"""
+        cases = (
+            (40120, 41230, 0, 0.0, True),    # 正常未命中
+            (40120, 41230, 32768, 0.0, False),  # 命中超过上一个的一半
+            (3000, 41230, 0, 0.0, False),     # 上一个 < 4000
+            (58804, 2090, 2048, 0.0, False),  # 这次不到上一个的一半
+            (40120, 18000, 0, 0.0, False),    # 这次不到上一个的一半
+            (40120, 42000, 38500, 0.0, False),  # 新算 3500 < 4000
+            (40120, 41230, 0, 61.0, False),   # 新的一轮（round.requests == 0）
+        )
+        for prev_prompt, prompt_len, cached, gap, want in cases:
+            with self.subTest(prev=prev_prompt, total=prompt_len,
+                               cached=cached, gap=gap):
+                self.assertIs(self._miss_case(prev_prompt, prompt_len,
+                                              cached, gap), want)
+
+    def test_snapshot_keys_prefill_and_decode(self):
+        """10. 预填充时 current 含三个键；没进 add_stream 时为 None/None/False；
+        解码时也有。"""
+        clock = FakeClock(0.0)
+        collector = make_collector(clock)
+        req = collector.begin()
+        cur = collector.snapshot()["current"]
+        self.assertIsNone(cur["prefill_cached"])
+        self.assertIsNone(cur["prefill_est_s"])
+        self.assertIs(cur["cache_miss"], False)
+        # 进入 add_stream（通过 job.stream 匹配）后
+        stream = PrefillStream(35012)
+        job = FakeJob()
+        job.stream = stream
+        collector.attach_job(req, job)
+        collector.prefill_begin(stream, 32768)
+        cur = collector.snapshot()["current"]
+        self.assertEqual(cur["prefill_cached"], 32768)
+        self.assertEqual(cur["prefill_est_s"], 3.797)
+        self.assertIs(cur["cache_miss"], False)
+        # 解码时也有这三个键
+        clock.advance(0.5)
+        collector.delta(req, "x")
+        self.assertEqual(collector.state(), "decode")
+        cur = collector.snapshot()["current"]
+        self.assertEqual(cur["prefill_cached"], 32768)
+        self.assertEqual(cur["prefill_est_s"], 3.797)
+        self.assertIs(cur["cache_miss"], False)
+
+    def test_prefill_model_default_estimates(self):
+        """11a. 默认系数的估算值。"""
+        m = tfpanel.PrefillModel()
+        self.assertEqual(m.estimate(32768, 2244), 3.797)
+        self.assertEqual(m.estimate(0, 41230), 57.191)
+        self.assertEqual(m.estimate(16384, 2036), 2.921)
+
+    def test_prefill_model_refit_recovers_coefs(self):
+        """11b. 按目标系数生成 40 个精确样本 → 拟合出的系数误差 < 1e-6。"""
+        m = tfpanel.PrefillModel()
+        target = (0.5, 2.0, 0.03)
+        cached_cycle = (0, 8000, 30000, 60000)
+        for i in range(40):
+            cached = cached_cycle[i % 4]
+            new = 500 + i * 500  # 500 .. 20000，含 ≥ 4000 的
+            f0, f1, f2 = m.features(cached, new)
+            m.add_sample(cached, new, target[0] * f0 + target[1] * f1
+                         + target[2] * f2)
+        for got, want in zip(m.coefs, target):
+            self.assertAlmostEqual(got, want, delta=1e-6)
+
+    def test_prefill_model_refit_gates(self):
+        """11c. 样本不足 30、或 new 全部 < 4000、或拟合出 b1 ≤ 0 → 系数不变。"""
+        # 29 个样本：系数不变
+        m = tfpanel.PrefillModel()
+        for i in range(29):
+            m.add_sample(1000, 5000 + i * 100, 1.0)
+        self.assertEqual(m.coefs, tfpanel.PREFILL_DEFAULT_COEFS)
+        # 30 个但 new 全部 < 4000：系数不变
+        m = tfpanel.PrefillModel()
+        for i in range(30):
+            m.add_sample(1000, 100 + i * 10, 1.0)
+        self.assertEqual(m.coefs, tfpanel.PREFILL_DEFAULT_COEFS)
+        # y 随 new 增大而减小 → 拟合出 b1 < 0 → 拒绝，系数不变
+        m = tfpanel.PrefillModel()
+        for i in range(30):
+            new = 5000 + i * 100
+            f0, f1, f2 = m.features(0, new)
+            m.add_sample(0, new, 100.0 - 0.01 * new)
+        self.assertEqual(m.coefs, tfpanel.PREFILL_DEFAULT_COEFS)
+
+    def test_prefill_model_rejects_invalid_samples(self):
+        """11d. 非法样本不记：new == 0、seconds <= 0、seconds 为 nan、
+        参数是 bool、cached 为负。"""
+        m = tfpanel.PrefillModel()
+        for bad in ((100, 0, 1.0), (100, 100, 0.0),
+                    (100, 100, float("nan")),
+                    (True, 100, 1.0), (100, True, 1.0), (100, 100, True),
+                    (-5, 100, 1.0)):
+            with self.subTest(sample=bad):
+                m.add_sample(*bad)
+                self.assertEqual(len(m._samples), 0)
+
+    def test_prefill_model_keeps_last_500(self):
+        """11e. 样本超过 500 个时只保留最近 500 个。"""
+        m = tfpanel.PrefillModel()
+        for i in range(600):
+            m.add_sample(0, 100 + i, 1.0)
+        self.assertEqual(len(m._samples), 500)
+        self.assertEqual(m._samples[0][1], 100 + 100)  # 最老的是第 101 个
+        self.assertEqual(m._samples[-1][1], 100 + 599)  # 最新的是第 600 个
+
+    def test_finish_records_prefill_sample(self):
+        """12. finish 记样本的各种规则。"""
+        clock = FakeClock(0.0)
+        collector = make_collector(clock)
+        model = collector.prefill_model
+
+        def good_job():
+            job = FakeJob()
+            job.started_at = 10.0
+            job.prefilled_at = 13.5
+            return job
+
+        def do_finish(reply):
+            req = collector.begin()
+            job = good_job()
+            collector.attach_job(req, job)
+            collector.finish(req, reply)
+
+        # 正常：(16000, 4000, 3.5)
+        do_finish({"prompt_tokens": 20000, "cached_tokens": 16000})
+        self.assertEqual(model._samples[-1], (16000, 4000, 3.5))
+        # 各种不记的情况
+        for reply in ({"prompt_tokens": 20000},                       # 缺 cached
+                      {"prompt_tokens": 20000, "cached_tokens": 20000},  # cached >= prompt
+                      {"prompt_tokens": 20000, "cached_tokens": 16000.0},  # 非 int
+                      None):                                           # 非 dict
+            with self.subTest(reply=reply):
+                do_finish(reply)
+                self.assertEqual(len(model._samples), 1)
+        # prefilled_at == 0.0 → 不记
+        req = collector.begin()
+        job = FakeJob()
+        job.started_at = 10.0
+        collector.attach_job(req, job)
+        collector.finish(req, {"prompt_tokens": 20000,
+                               "cached_tokens": 16000})
+        self.assertEqual(len(model._samples), 1)
+        # 没有 job → 不记
+        req = collector.begin()
+        collector.finish(req, {"prompt_tokens": 20000,
+                               "cached_tokens": 16000})
+        self.assertEqual(len(model._samples), 1)
+        # fail() 不记
+        req = collector.begin()
+        collector.attach_job(req, good_job())
+        collector.fail(req)
+        self.assertEqual(len(model._samples), 1)
+
+    def test_prefill_missing_cases(self):
+        """13. 模块里没有 LaneEngine → hooks.prefill == "missing"，chat/render/
+        tokens 照常；自检不通过 → hooks.prefill == "missing"。"""
+        collector = make_collector(FakeClock())
+        app_cls = make_app_cls(reply={"ok": 1})
+        module = fake_module(app_cls)  # 没有 LaneEngine
+        module.Scheduler = FakeScheduler
+        hooks = {"chat": "missing", "render": "missing",
+                 "tokens": "missing", "prefill": "missing"}
+        self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
+        self.assertEqual(hooks["prefill"], "missing")
+        self.assertEqual(hooks["chat"], "ok")
+        self.assertEqual(hooks["render"], "missing")  # 模块本来就没有 render
+        self.assertEqual(hooks["tokens"], "ok")
+        self.assertEqual(app_cls().chat([{"role": "user", "content": "hi"}]),
+                         {"ok": 1})
+        # 自检不通过（强制失败）→ 四项全 missing
+        collector2 = make_collector(FakeClock())
+        hooks2 = {"chat": "pending", "render": "pending",
+                  "tokens": "pending", "prefill": "pending"}
+        module2 = fake_module(make_app_cls(reply={"ok": 1}))
+        module2.Scheduler = FakeScheduler
+        module2.LaneEngine = FakeLaneEngine
+        self.assertFalse(tfpanel.run_self_check(module2, collector2, hooks2,
+                                                force_fail=True))
+        self.assertEqual(hooks2["prefill"], "missing")
+        self.assertEqual(hooks2["chat"], "missing")
 
 
 if __name__ == "__main__":

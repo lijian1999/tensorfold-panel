@@ -40,14 +40,17 @@ public struct Card: Equatable, Sendable {
     }
 }
 
-/// 状态条右侧文本段（bold 段用 --text-2 颜色加深）
+/// 状态条右侧文本段（bold 段用 --text-2 颜色加深；warn 段用琥珀色）
 public struct StripSegment: Equatable, Sendable {
     public var text: String
     public var bold: Bool
+    /// 为 true 时这一段用琥珀色显示
+    public var warn: Bool
 
-    public init(_ text: String, bold: Bool = false) {
+    public init(_ text: String, bold: Bool = false, warn: Bool = false) {
         self.text = text
         self.bold = bold
+        self.warn = warn
     }
 }
 
@@ -502,13 +505,21 @@ public struct PanelViewModel: Equatable, Sendable {
         // 已用时 = current.elapsed_s + (now − fetchedAt)，本地插值让画面连续走秒
         var elapsed = m?.current?.elapsedS ?? 0
         if let fetchedAt = tracker.fetchedAt { elapsed += max(0, now - fetchedAt) }
-        // 先取“灰色画面”，再按已用时决定接管程度
+        // 缓存信息（老版本采集器没有这些字段，为 nil 时按原来的画面显示）
+        let cur = m?.current
+        let prompt = cur?.promptTokens
+        let cached = cur?.prefillCached
+        let est = cur?.prefillEstS
+        let miss = cur?.cacheMiss ?? false
+        // 先取“灰色画面”，再按已用时 / 预计时间 / 缓存未命中决定接管程度
         var vm = Self.restView(
             state: .prefill, stateName: "预填充中",
             m: m, tracker: tracker, memory: memory, modelName: modelName,
             roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
         )
-        if elapsed < Self.shortPrefillS {
+        // 长短判定：预计 ≥ 3 秒或缓存未命中时，一开始就切成“已用时”画面，不干等 3 秒
+        let long = elapsed >= Self.shortPrefillS || (est ?? 0) >= Self.shortPrefillS || miss
+        if !long {
             // 短预填充：画面和预填充之前一样，只把状态条右侧换成已用时
             vm.stripRight = [
                 StripSegment("已用时 "),
@@ -526,13 +537,47 @@ public struct PanelViewModel: Equatable, Sendable {
         let (i, d) = elapsed < 10 ? Format.split1(elapsed) : ("\(Int(elapsed))", "")
         vm.bigInt = i
         vm.bigDec = d
-        vm.stripRight = [StripSegment("提示较长，可能需要几秒")]
-        if !roundMode {
-            vm.cards = [
-                .pending("输出"),
-                .pending("首字", foot: "等待首个 token"),
-                memoryCard(memory),
-            ]
+        // 拿得到缓存信息（提示 token 数已知且 > 0，且缓存命中数已知）
+        if let prompt, prompt > 0, let cached {
+            let hit = min(100, max(0, Int((Double(cached) / Double(prompt) * 100).rounded())))
+            let newTok = max(0, prompt - cached)
+            // 预计段：开始时的估算总时长，不随时间倒数；拿不到时省略
+            let eta: [StripSegment] = est.map {
+                [StripSegment(" · 预计约 "),
+                 StripSegment("\(Int($0.rounded(.up)))", bold: true),
+                 StripSegment(" s")]
+            } ?? []
+            if roundMode {
+                let hitSegs: [StripSegment] = miss
+                    ? [StripSegment("缓存未命中", warn: true)]
+                    : [StripSegment("缓存命中 "), StripSegment("\(hit)%", bold: true)]
+                vm.stripRight = hitSegs
+                    + [StripSegment(" · 新算 "), StripSegment(Format.tokFmt(Double(newTok)), bold: true)]
+                    + eta
+                // 一轮模式：保持 restView 的一轮卡片
+            } else {
+                vm.stripRight = [StripSegment("新算 ")]
+                    + [StripSegment(Format.tokFmt(Double(newTok)), bold: true), StripSegment(" tok")]
+                    + eta
+                vm.cards = [
+                    Card(
+                        label: "缓存命中", value: "\(hit)", unit: "%",
+                        foot: "\(Format.tokFmt(Double(cached))) / \(Format.tokFmt(Double(prompt)))"
+                    ),
+                    .pending("首字", foot: "等待首个 token"),
+                    memoryCard(memory),
+                ]
+            }
+        } else {
+            // 拿不到缓存信息：退回原来的画面
+            vm.stripRight = [StripSegment("提示较长，可能需要几秒")]
+            if !roundMode {
+                vm.cards = [
+                    .pending("输出"),
+                    .pending("首字", foot: "等待首个 token"),
+                    memoryCard(memory),
+                ]
+            }
         }
         return vm
     }
