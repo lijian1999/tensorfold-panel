@@ -6,7 +6,7 @@
   "context_max": 262144,
   "hooks": { "chat": "ok" },
   "current": {
-    "elapsed_s": 4.6,
+    "elapsed_s": 1.2,
     "ttft_s": null,
     "output_tokens": null,
     "decode_tps": null,

@@ -554,7 +554,7 @@ class TestMetricsHttp(unittest.TestCase):
                 data = json.loads(resp.read().decode("utf-8"))
             for key in ("version", "state", "engine_ready", "model",
                         "tensorfold_version", "context_max", "hooks",
-                        "current", "last", "totals"):
+                        "current", "last", "totals", "round"):
                 self.assertIn(key, data)
             self.assertEqual(data["version"], 1)
             self.assertEqual(data["state"], "idle")
@@ -625,6 +625,178 @@ class TestMetricsHttp(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+def _round_reply(completion=None, tps=None, include_tps=True):
+    """构造一份成绩单：可去掉/置零 completion_tokens 和 tokens_per_second。"""
+    reply = {"finish_reason": "stop"}
+    if completion is not None:
+        reply["completion_tokens"] = completion
+    if include_tps:
+        reply["runtime"] = ({"tokens_per_second": tps} if tps is not None else {})
+    return reply
+
+
+class TestRound(unittest.TestCase):
+    """一轮统计：间隔内的连续请求合并为一轮，/metrics 的 round 字段。"""
+
+    def _collector(self, clock=None, gap=60.0):
+        if clock is None:
+            clock = FakeClock(0.0)
+        return tfpanel.Collector(clock=clock, start_worker=False,
+                                 round_gap_s=gap)
+
+    def test_round_none_before_begin(self):
+        """1. 启动后未 begin 过：round 为 null。"""
+        self.assertIsNone(self._collector().snapshot()["round"])
+
+    def test_round_after_first_begin(self):
+        """2. 第一个请求 begin 后：round 出现，计数为 0，active 为 true。"""
+        c = self._collector(FakeClock(1000.0))
+        c.begin()
+        self.assertEqual(c.snapshot()["round"],
+                         {"requests": 0, "output_tokens": 0, "decode_tps_avg": None,
+                          "elapsed_s": 0.0, "active": True})
+
+    def test_same_round_when_within_gap(self):
+        """3. finish 在 t=10、下个 begin 在 t=70（间隔恰好 60）→ 同一轮。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        clock.advance(10)
+        c.finish(r1, _round_reply(100))
+        clock.advance(60)   # t=70，距上次活动 60 ≤ round_gap_s → 并入当前轮
+        r2 = c.begin()
+        clock.advance(5)
+        c.finish(r2, _round_reply(200))
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 2)
+        self.assertEqual(rd["output_tokens"], 300)
+
+    def test_new_round_when_gap_exceeded(self):
+        """4. 间隔 60.001 > round_gap_s → 新的一轮，计数清零。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        clock.advance(10)
+        c.finish(r1, _round_reply(100, tps=50))
+        clock.advance(60.001)  # t=70.001 → 新轮
+        r2 = c.begin()
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 0)
+        self.assertEqual(rd["output_tokens"], 0)
+        self.assertIsNone(rd["decode_tps_avg"])
+        self.assertTrue(rd["active"])
+        c.finish(r2, _round_reply(200))
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 1)
+        self.assertEqual(rd["output_tokens"], 200)
+
+    def test_avg_token_weighted(self):
+        """5. 平均速度按 token 加权：400 ÷ 5 = 80.0，不是 (50+100)/2。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        rA = c.begin()
+        clock.advance(2)
+        c.finish(rA, _round_reply(100, tps=50))
+        rB = c.begin()
+        clock.advance(3)
+        c.finish(rB, _round_reply(300, tps=100))
+        self.assertEqual(c.snapshot()["round"]["decode_tps_avg"], 80.0)
+
+    def test_non_participating_requests(self):
+        """6. 缺 tps / tps=0 / completion=0：计入 requests 和 output_tokens，不参与平均。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        clock.advance(1)
+        c.finish(r1, _round_reply(50, include_tps=False))
+        r2 = c.begin()
+        clock.advance(1)
+        c.finish(r2, _round_reply(70, tps=0))
+        r3 = c.begin()
+        clock.advance(1)
+        c.finish(r3, _round_reply(0, tps=100))
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 3)
+        self.assertEqual(rd["output_tokens"], 120)
+        self.assertIsNone(rd["decode_tps_avg"])
+
+    def test_fail_only_refreshes_last_activity(self):
+        """7. fail 不计入 requests，但刷新 last_activity，不影响轮边界。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        c.finish(r1, _round_reply(100))  # finish 在 t=0
+        r2 = c.begin()
+        clock.advance(50)
+        c.fail(r2)                        # fail 在 t=50，刷新 last_activity
+        clock.advance(50)
+        r3 = c.begin()                    # t=100，100-50=50 ≤ 60 → 仍是同一轮
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 1)
+        self.assertEqual(rd["output_tokens"], 100)
+        c.fail(r3)
+
+    def test_begin_always_joins_when_in_progress(self):
+        """8. 有请求进行中时，另一个 begin 一定并入当前轮（即使超过 gap）。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        clock.advance(1000)  # 远超 round_gap_s
+        r2 = c.begin()       # r1 进行中 → 并入
+        c.finish(r1, _round_reply(10))
+        c.finish(r2, _round_reply(20))
+        rd = c.snapshot()["round"]
+        self.assertEqual(rd["requests"], 2)
+        self.assertEqual(rd["output_tokens"], 30)
+        self.assertEqual(rd["elapsed_s"], 1000.0)
+
+    def test_elapsed_s_freezes_when_idle(self):
+        """9. 进行中 = now − 开始；空闲后停在 last_activity − 开始，不再变化。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        clock.advance(3)
+        self.assertEqual(c.snapshot()["round"]["elapsed_s"], 3.0)
+        clock.advance(2)
+        c.finish(r1, _round_reply(5))
+        self.assertEqual(c.snapshot()["round"]["elapsed_s"], 5.0)
+        clock.advance(100)
+        self.assertEqual(c.snapshot()["round"]["elapsed_s"], 5.0)
+        clock.advance(1000)
+        self.assertEqual(c.snapshot()["round"]["elapsed_s"], 5.0)
+
+    def test_active_window(self):
+        """10. 最后一次结束后 60 秒内 active=true，60.001 秒后 false；进行中为 true。"""
+        clock = FakeClock(0.0)
+        c = self._collector(clock)
+        r1 = c.begin()
+        c.finish(r1, _round_reply(5))  # 最后一次活动结束于 t=0
+        clock.advance(59.999)
+        self.assertTrue(c.snapshot()["round"]["active"])
+        clock.advance(0.002)  # 距结束 60.001 > 60
+        self.assertFalse(c.snapshot()["round"]["active"])
+        r2 = c.begin()
+        self.assertTrue(c.snapshot()["round"]["active"])
+        c.fail(r2)
+
+
+class TestRoundGapFromEnv(unittest.TestCase):
+    """12. main() 的环境变量解析：round_gap_from_env。"""
+
+    def test_unset_defaults_to_60(self):
+        self.assertEqual(tfpanel.round_gap_from_env({}), 60.0)
+
+    def test_valid_value(self):
+        self.assertEqual(tfpanel.round_gap_from_env({"TFPANEL_ROUND_GAP_S": "30"}),
+                         30.0)
+
+    def test_invalid_values_fall_back_to_60(self):
+        for value in ("abc", "0", "-5"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    tfpanel.round_gap_from_env({"TFPANEL_ROUND_GAP_S": value}), 60.0)
 
 
 if __name__ == "__main__":

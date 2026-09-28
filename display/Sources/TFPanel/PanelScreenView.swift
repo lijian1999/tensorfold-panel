@@ -57,7 +57,7 @@ struct StripView: View {
         }
         .padding(.horizontal, 2 * s)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(frame.fadeOpacity)
+        .opacity(frame.stripOpacity)
     }
 
     /// 圆点颜色：offline danger、unavailable/starting/prefill amber、idle faint、decode/done accent
@@ -97,7 +97,7 @@ struct GaugeView: View {
         ZStack {
             DialView(model: model, display: frame.display, s: s)
             CenterView(model: model, frame: frame, s: s)
-                .opacity(frame.fadeOpacity)
+                .opacity(frame.centerOpacity)
         }
     }
 }
@@ -118,7 +118,7 @@ struct DialArc: InsettableShape {
     }
 }
 
-/// 圆弧部分：轨道 → 刻痕 → 残影点 → 彗尾 + 彗星 → 数值弧 → 刻度数字
+/// 圆弧部分：轨道 → 刻痕 → 残影点 → 数值弧 → 刻度数字
 struct DialView: View {
     let model: PanelViewModel
     /// 缓动后的弧值（tok/s）
@@ -145,29 +145,12 @@ struct DialView: View {
                     .position(Self.pt(g, s: s))
                     .opacity(0.9)
             }
-            // 4. 预填充扫动弧段：先画彗尾，再画彗星
-            if arc == .comet, let ph = model.cometPhase {
-                let e = ph < 0.5 ? 2 * ph * ph : 1 - pow(-2 * ph + 2, 2) / 2
-                let head = e * 1020 - 10        // 单位：弧长的千分之一
-                let cLo = max(0, head - 130), cHi = min(1000, head)
-                let tLo = max(0, head - 240), tHi = min(1000, head)
-                if tHi > tLo {
-                    full.trim(from: CGFloat(tLo / 1000), to: CGFloat(tHi / 1000))
-                        .stroke(Theme.amber, style: StrokeStyle(lineWidth: sw, lineCap: .round))
-                        .opacity(0.28)
-                }
-                if cHi > cLo {
-                    full.trim(from: CGFloat(cLo / 1000), to: CGFloat(cHi / 1000))
-                        .stroke(Theme.amber, style: StrokeStyle(lineWidth: sw, lineCap: .round))
-                        .opacity(1)
-                }
-            }
-            // 5. 数值弧（decode/done）
+            // 4. 数值弧（decode/done）
             if arc == .value {
                 full.trim(from: 0, to: Gauge.valueToFraction(display))
                     .stroke(Theme.accent, style: StrokeStyle(lineWidth: sw, lineCap: .round))
             }
-            // 6. 刻度数字（off 0.35、rest 0.75、其他 1）
+            // 5. 刻度数字（off 0.35、rest 0.75、其他 1）
             tickLabels.opacity(arc == .off ? 0.35 : (arc == .rest ? 0.75 : 1))
         }
     }
@@ -260,20 +243,20 @@ struct CenterView: View {
                 .font(.system(size: 13 * s))
                 .foregroundColor(Theme.muted)
             if model.pill {
-                let idlePill = (model.state == .idle)
+                let dimPill = model.muted
                 Text("精确")
                     .font(.system(size: 12 * s, weight: .semibold).monospacedDigit())
                     .tracking(0.04 * 12 * s)
-                    .foregroundColor(idlePill ? Theme.muted : Theme.pillText)
+                    .foregroundColor(dimPill ? Theme.muted : Theme.pillText)
                     .frame(height: 18 * s)
                     .padding(.horizontal, 7 * s)
                     .background(
                         RoundedRectangle(cornerRadius: 9 * s)
-                            .fill(idlePill ? Color.clear : Theme.pillBg)
+                            .fill(dimPill ? Color.clear : Theme.pillBg)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 9 * s)
-                            .stroke(idlePill ? Theme.faint : Color.clear, lineWidth: 1 * s)
+                            .stroke(dimPill ? Theme.faint : Color.clear, lineWidth: 1 * s)
                     )
             }
         }
@@ -281,13 +264,13 @@ struct CenterView: View {
         .position(x: 154 * s, y: (78 + 10) * s)
     }
 
-    /// 大数字（y=97，高 96）：整数 96 号 bold + 小数 40 号，基线对齐；idle 用 text2；
-    /// 占位 “—”（无上次结果）用 56 号 faint，避免 96 号粗体像一根横条。
+    /// 大数字（y=97，高 96）：整数 96 号 bold + 小数 40 号，基线对齐；muted（不在解码时的灰色画面）用 text2；
+    /// 占位 “—”（无上次结果/无本轮成绩）用 56 号 faint，避免 96 号粗体像一根横条。
     /// 全部等宽数字（design.md 硬性要求：数字变化时不左右抖动，解码大数字每秒刷新 4 次）。
     /// 字距 −0.035em（整数）/ −0.01em（小数）；整段在 220 宽区内居中；y 相对行盒中心上移 3 单位（对照原型实测）。
     private var bigRow: some View {
         let isDash = frame.bigInt == "—"
-        let color = isDash ? Theme.faint : (model.state == .idle ? Theme.text2 : Theme.text)
+        let color = isDash ? Theme.faint : (model.muted ? Theme.text2 : Theme.text)
         let intSize = isDash ? 56.0 : 96.0
         let decSize = model.whole ? 96.0 : 40.0
         let decTrack = -(model.whole ? 0.035 * 96 : 0.01 * 40)   // 字距（设计单位）
@@ -360,25 +343,26 @@ struct CardsView: View {
     var body: some View {
         VStack(spacing: 6 * s) {
             ForEach(Array(model.cards.enumerated()), id: \.offset) { _, c in
-                CardView(card: c, state: model.state, s: s)
+                CardView(
+                    card: c,
+                    muted: model.muted || model.state == .offline || model.state == .unavailable || model.state == .starting,
+                    s: s
+                )
             }
         }
-        .opacity(frame.fadeOpacity)
+        .opacity(frame.cardsOpacity)
     }
 }
 
 struct CardView: View {
     let card: Card
-    let state: PanelState
+    let muted: Bool
     let s: CGFloat
 
-    /// 数值颜色：pending 用 faint；idle / offline / unavailable / starting 用 text2；其他 text
+    /// 数值颜色：pending 用 faint；muted（含 offline / unavailable / starting）用 text2；其他 text
     private var valueColor: Color {
         if card.pending { return Theme.faint }
-        switch state {
-        case .idle, .offline, .unavailable, .starting: return Theme.text2
-        default: return Theme.text
-        }
+        return muted ? Theme.text2 : Theme.text
     }
 
     var body: some View {

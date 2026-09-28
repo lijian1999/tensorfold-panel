@@ -15,7 +15,6 @@ public enum PanelState: String, Sendable {
 public enum ArcMode: String, Sendable {
     case value
     case rest
-    case comet
     case off
 }
 
@@ -197,19 +196,30 @@ public struct PanelViewModel: Equatable, Sendable {
     public var bigDec: String
     public var whole: Bool
     public var unit: String
+    /// “不在解码时的灰色画面”：大数字、卡片数值用灰色，药丸用描边样式
+    public var muted: Bool
     public var arc: ArcMode
     /// 圆弧目标值（tok/s，界面层用它做缓动）
     public var arcTarget: Double
-    /// 空闲时圆弧上「上次位置」小点（v2f(上次平均速度)）
+    /// 不在解码时圆弧上「上次位置/本轮平均位置」小点
     public var ghostFraction: Double?
-    /// 预填充扫动弧段相位（0–1）
-    public var cometPhase: Double?
     public var showSpark: Bool
     public var spark: [SparkSample]
     /// 离线/不可用/启动中时显示在仪表中央
     public var message: CenterMessage?
     /// 恰好 3 张
     public var cards: [Card]
+
+    /// 短预填充阈值（秒），之前不接管画面
+    public static let shortPrefillS: Double = 3.0
+
+    /// 中间区域（标题、单位、提示文字）淡入键
+    public var centerFadeKey: String {
+        "\(cap)|\(unit)|\(whole)|\(muted)|\(message?.title ?? "")"
+    }
+
+    /// 右侧三项标签淡入键
+    public var cardsFadeKey: String { cards.map(\.label).joined(separator: "|") }
 
     /// 由连接状态 + 当前时间 + 系统内存生成一帧画面。
     /// 状态判定顺序：离线 → hooks.chat == "missing"（unavailable）
@@ -233,6 +243,12 @@ public struct PanelViewModel: Equatable, Sendable {
 
         // 当前模型名（短名）；idle/prefill/decode/done 的 stripLeft 都用它
         let modelName = Self.shortModelName(from: m, tracker: tracker)
+        // 一轮模式判定（只对 idle / prefill / decode / done 生效）
+        let round = m?.round
+        let inFlight = (state == .prefill || state == .decode)
+        let roundCount = (round?.requests ?? 0) + (inFlight ? 1 : 0)
+        let roundMode = round != nil && roundCount >= 2
+        let roundActive = inFlight || (round?.active ?? false)
         switch state {
         case .offline:
             return Self.offlineView(m: m, tracker: tracker, now: now, memory: memory)
@@ -241,13 +257,26 @@ public struct PanelViewModel: Equatable, Sendable {
         case .starting:
             return Self.startingView(m: m, tracker: tracker, memory: memory)
         case .idle:
-            return Self.idleView(m: m, tracker: tracker, memory: memory, modelName: modelName)
+            return Self.restView(
+                state: .idle, stateName: "空闲",
+                m: m, tracker: tracker, memory: memory, modelName: modelName,
+                roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+            )
         case .prefill:
-            return Self.prefillView(m: m, tracker: tracker, now: now, memory: memory, modelName: modelName)
+            return Self.prefillView(
+                m: m, tracker: tracker, now: now, memory: memory, modelName: modelName,
+                roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+            )
         case .decode:
-            return Self.decodeView(m: m, tracker: tracker, memory: memory, modelName: modelName)
+            return Self.decodeView(
+                m: m, tracker: tracker, memory: memory, modelName: modelName,
+                roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+            )
         case .done:
-            return Self.doneView(m: m, tracker: tracker, memory: memory, modelName: modelName)
+            return Self.doneView(
+                m: m, tracker: tracker, memory: memory, modelName: modelName,
+                roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+            )
         }
     }
 
@@ -308,8 +337,8 @@ public struct PanelViewModel: Equatable, Sendable {
             stripLeft: stripLeft,
             stripRight: [],
             cap: "", pill: false, bigInt: "", bigDec: "",
-            whole: false, unit: "tok/s",
-            arc: .off, arcTarget: 0, ghostFraction: nil, cometPhase: nil,
+            whole: false, unit: "tok/s", muted: false,
+            arc: .off, arcTarget: 0, ghostFraction: nil,
             showSpark: false, spark: [],
             message: CenterMessage(title: "引擎离线", subtitle: "等待 TensorFold 响应…"),
             cards: [lastAvgCard(tracker), Card(label: "已离线", value: v, unit: u), memoryCard(memory)]
@@ -327,8 +356,8 @@ public struct PanelViewModel: Equatable, Sendable {
             stripLeft: modelName,
             stripRight: [],
             cap: "", pill: false, bigInt: "", bigDec: "",
-            whole: false, unit: "tok/s",
-            arc: .off, arcTarget: 0, ghostFraction: nil, cometPhase: nil,
+            whole: false, unit: "tok/s", muted: false,
+            arc: .off, arcTarget: 0, ghostFraction: nil,
             showSpark: false, spark: [],
             message: CenterMessage(title: "指标不可用", subtitle: "TensorFold 已更新，需要适配"),
             cards: [lastAvgCard(tracker), Card(label: "运行", value: v, unit: u), memoryCard(memory)]
@@ -346,87 +375,165 @@ public struct PanelViewModel: Equatable, Sendable {
             stripLeft: "TensorFold",
             stripRight: [],
             cap: "", pill: false, bigInt: "", bigDec: "",
-            whole: false, unit: "tok/s",
-            arc: .off, arcTarget: 0, ghostFraction: nil, cometPhase: nil,
+            whole: false, unit: "tok/s", muted: false,
+            arc: .off, arcTarget: 0, ghostFraction: nil,
             showSpark: false, spark: [],
             message: CenterMessage(title: "模型加载中", subtitle: "TensorFold 正在启动…"),
             cards: [lastAvgCard(tracker), Card(label: "运行", value: v, unit: u), memoryCard(memory)]
         )
     }
 
-    private static func idleView(
+    /// 一轮模式的三张卡片（标签随 roundActive 变化）
+    private static func roundCards(
+        round: Metrics.Round?, roundCount: Int, roundActive: Bool,
+        state: PanelState, m: Metrics?
+    ) -> [Card] {
+        let req = roundActive ? "本轮请求" : "上轮请求"
+        let out = roundActive ? "累计输出" : "上轮输出"
+        let avg = roundActive ? "本轮平均" : "上轮平均"
+        // 用时：秒/分钟/小时向下取整；为空时不显示
+        let foot: String
+        if let e = round?.elapsedS {
+            let (v, u) = durationParts(e)
+            foot = "用时 \(v) \(u)"
+        } else {
+            foot = ""
+        }
+        // 累计输出 = 已完成请求之和 + 进行中请求的换算输出
+        let inFlightOutput = (state == .decode) ? (m?.current?.outputTokens ?? 0) : 0
+        let output = Format.tokFmt(Double((round?.outputTokens ?? 0) + inFlightOutput))
+        let avgCard: Card
+        if let tps = round?.decodeTpsAvg {
+            avgCard = Card(label: avg, value: Format.fixed(tps, 1), unit: "", foot: "tok/s")
+        } else {
+            avgCard = .pending(avg)
+        }
+        return [
+            Card(label: req, value: "\(roundCount)", unit: "次", foot: foot),
+            Card(label: out, value: output, unit: "tok"),
+            avgCard,
+        ]
+    }
+
+    /// “灰色画面”：不在解码时的公共画面（空闲 / 一轮完成 / 短预填充，圆弧不动、小点留在原位）。
+    private static func restView(
+        state: PanelState, stateName: String,
         m: Metrics?, tracker: ConnectionTracker,
-        memory: (usedGB: Double, totalGB: Double)?, modelName: String
+        memory: (usedGB: Double, totalGB: Double)?, modelName: String,
+        roundMode: Bool, roundCount: Int, roundActive: Bool
     ) -> PanelViewModel {
-        // 数据用 metrics.last，为空时用 rememberedLast
-        let last = m?.last ?? tracker.rememberedLast
+        let round = m?.round
         var vm = PanelViewModel(
-            state: .idle,
-            stateName: "空闲",
+            state: state,
+            stateName: stateName,
             stripLeft: modelName,
             stripRight: [],
-            cap: "上次平均", pill: true,
+            cap: "", pill: false,
             bigInt: "", bigDec: "", whole: false, unit: "tok/s",
+            muted: true,
             arc: .rest, arcTarget: 0,
-            ghostFraction: last?.decodeTps.map(Gauge.valueToFraction),
-            cometPhase: nil, showSpark: false, spark: [],
+            ghostFraction: nil,
+            showSpark: false, spark: [],
             message: nil,
             cards: []
         )
-        if let last {
-            let final = last.decodeTps ?? 0
-            let (i, d) = Format.split1(final)
+        if !roundMode {
+            // 单请求：与空闲画面相同（数据用 metrics.last，为空时用 rememberedLast）
+            let last = m?.last ?? tracker.rememberedLast
+            vm.cap = "上次平均"
+            vm.pill = true
+            if let last {
+                let final = last.decodeTps ?? 0
+                let (i, d) = Format.split1(final)
+                vm.bigInt = i
+                vm.bigDec = d
+                vm.arcTarget = final
+                vm.ghostFraction = last.decodeTps.map(Gauge.valueToFraction)
+                let output = last.completionTokens.map { Format.tokFmt(Double($0)) }
+                let ttft = last.ttftS.map { Format.fixed($0, 2) }
+                vm.cards = [
+                    output.map { Card(label: "输出", value: $0, unit: "tok") } ?? .pending("输出"),
+                    ttft.map { Card(label: "首字", value: $0, unit: "s") } ?? .pending("首字"),
+                    memoryCard(memory),
+                ]
+            } else {
+                // 没有上次结果：大数字为 —，不带「精确」标记
+                vm.bigInt = "—"
+                vm.bigDec = ""
+                vm.pill = false
+                vm.cards = [.pending("输出"), .pending("首字"), memoryCard(memory)]
+            }
+            return vm
+        }
+        // 一轮模式：本轮/上轮平均
+        let avg = round?.decodeTpsAvg
+        vm.cap = roundActive ? "本轮平均" : "上轮平均"
+        vm.pill = avg != nil
+        if let avg {
+            let (i, d) = Format.split1(avg)
             vm.bigInt = i
             vm.bigDec = d
-            vm.arcTarget = final
-            let output = last.completionTokens.map { Format.tokFmt(Double($0)) }
-            let ttft = last.ttftS.map { Format.fixed($0, 2) }
-            vm.cards = [
-                output.map { Card(label: "输出", value: $0, unit: "tok") } ?? .pending("输出"),
-                ttft.map { Card(label: "首字", value: $0, unit: "s") } ?? .pending("首字"),
-                memoryCard(memory),
-            ]
+            vm.arcTarget = avg
+            vm.ghostFraction = Gauge.valueToFraction(avg)
         } else {
-            // 没有上次结果：大数字为 —，不带「精确」标记
             vm.bigInt = "—"
             vm.bigDec = ""
-            vm.pill = false
-            vm.cards = [.pending("输出"), .pending("首字"), memoryCard(memory)]
         }
+        vm.cards = Self.roundCards(
+            round: round, roundCount: roundCount, roundActive: roundActive,
+            state: state, m: m
+        )
         return vm
     }
 
     private static func prefillView(
         m: Metrics?, tracker: ConnectionTracker,
         now: Double,
-        memory: (usedGB: Double, totalGB: Double)?, modelName: String
+        memory: (usedGB: Double, totalGB: Double)?, modelName: String,
+        roundMode: Bool, roundCount: Int, roundActive: Bool
     ) -> PanelViewModel {
         // 已用时 = current.elapsed_s + (now − fetchedAt)，本地插值让画面连续走秒
         var elapsed = m?.current?.elapsedS ?? 0
         if let fetchedAt = tracker.fetchedAt { elapsed += max(0, now - fetchedAt) }
+        // 先取“灰色画面”，再按已用时决定接管程度
+        var vm = Self.restView(
+            state: .prefill, stateName: "预填充中",
+            m: m, tracker: tracker, memory: memory, modelName: modelName,
+            roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+        )
+        if elapsed < Self.shortPrefillS {
+            // 短预填充：画面和预填充之前一样，只把状态条右侧换成已用时
+            vm.stripRight = [
+                StripSegment("已用时 "),
+                StripSegment(Format.fixed(elapsed, 1), bold: true),
+                StripSegment(" s"),
+            ]
+            return vm
+        }
+        // 长预填充：接管大数字（圆弧不动，小点留在原位）
+        vm.muted = false
+        vm.pill = false
+        vm.cap = "已用时"
+        vm.whole = true
+        vm.unit = "秒"
         let (i, d) = elapsed < 10 ? Format.split1(elapsed) : ("\(Int(elapsed))", "")
-        return PanelViewModel(
-            state: .prefill,
-            stateName: "预填充中",
-            stripLeft: modelName,
-            stripRight: elapsed > 1.5 ? [StripSegment("提示较长，可能需要几秒")] : [],
-            cap: "已用时", pill: false,
-            bigInt: i, bigDec: d, whole: true, unit: "秒",
-            arc: .comet, arcTarget: 0, ghostFraction: nil,
-            cometPhase: (elapsed.truncatingRemainder(dividingBy: 1.5)) / 1.5,
-            showSpark: false, spark: [],
-            message: nil,
-            cards: [
+        vm.bigInt = i
+        vm.bigDec = d
+        vm.stripRight = [StripSegment("提示较长，可能需要几秒")]
+        if !roundMode {
+            vm.cards = [
                 .pending("输出"),
                 .pending("首字", foot: "等待首个 token"),
                 memoryCard(memory),
             ]
-        )
+        }
+        return vm
     }
 
     private static func decodeView(
         m: Metrics?, tracker: ConnectionTracker,
-        memory: (usedGB: Double, totalGB: Double)?, modelName: String
+        memory: (usedGB: Double, totalGB: Double)?, modelName: String,
+        roundMode: Bool, roundCount: Int, roundActive: Bool
     ) -> PanelViewModel {
         let cur = m?.current
         let target = cur?.decodeTps ?? 0
@@ -447,6 +554,18 @@ public struct PanelViewModel: Equatable, Sendable {
             guard let peak = cur?.decodeTpsPeak, peak > 0 else { return .pending("峰值") }
             return Card(label: "峰值", value: "\(Int(peak.rounded()))", unit: "tok/s")
         }()
+        // 一轮模式只把右侧三项换成本轮累计，其余不变
+        let cards: [Card] = roundMode
+            ? Self.roundCards(
+                round: m?.round, roundCount: roundCount, roundActive: roundActive,
+                state: .decode, m: m
+              )
+            : [
+                output.map { Card(label: "输出", value: $0, unit: "tok") } ?? .pending("输出"),
+                avg.map { Card(label: "平均", value: Format.fixed($0, 1), foot: "tok/s") }
+                    ?? .pending("平均"),
+                peakCard,
+            ]
         return PanelViewModel(
             state: .decode,
             stateName: "解码中",
@@ -454,36 +573,46 @@ public struct PanelViewModel: Equatable, Sendable {
             stripRight: stripRight,
             cap: "解码速度", pill: false,
             bigInt: "\(Int(target.rounded()))", bigDec: "",
-            whole: false, unit: "tok/s",
+            whole: false, unit: "tok/s", muted: false,
             arc: .value, arcTarget: target,
             ghostFraction: (m?.last ?? tracker.rememberedLast)?.decodeTps.map(Gauge.valueToFraction),
-            cometPhase: nil,
             showSpark: true, spark: tracker.sparkSamples,
             message: nil,
-            cards: [
-                output.map { Card(label: "输出", value: $0, unit: "tok") } ?? .pending("输出"),
-                avg.map { Card(label: "平均", value: Format.fixed($0, 1), foot: "tok/s") }
-                    ?? .pending("平均"),
-                peakCard,
-            ]
+            cards: cards
         )
+    }
+
+    /// 完成画面“上下文 X / Y”状态条段（单请求完成与一轮完成共用）；contextMax 为空时省略「 / …」
+    private static func contextStrip(last: Metrics.Last?, contextMax: Int?) -> [StripSegment] {
+        var segs = [StripSegment("上下文 ", bold: false)]
+        if let used = last?.contextUsed {
+            segs.append(StripSegment(Format.tokFmt(Double(used)), bold: true))
+            if let max = contextMax {
+                segs.append(StripSegment(" / \(Format.tokFmt(Double(max)))", bold: false))
+            }
+        }
+        return segs
     }
 
     private static func doneView(
         m: Metrics?, tracker: ConnectionTracker,
-        memory: (usedGB: Double, totalGB: Double)?, modelName: String
+        memory: (usedGB: Double, totalGB: Double)?, modelName: String,
+        roundMode: Bool, roundCount: Int, roundActive: Bool
     ) -> PanelViewModel {
+        // 一轮模式：不单独显示“完成”画面，用灰色画面，只换状态名和状态条
+        if roundMode {
+            var vm = Self.restView(
+                state: .done, stateName: "完成",
+                m: m, tracker: tracker, memory: memory, modelName: modelName,
+                roundMode: roundMode, roundCount: roundCount, roundActive: roundActive
+            )
+            vm.stripRight = Self.contextStrip(last: m?.last, contextMax: m?.contextMax)
+            return vm
+        }
         let last = m?.last
         let target = last?.decodeTps ?? 0
         let (i, d) = Format.split1(target)
-        // 上下文 X / Y；contextMax 为空时省略「 / …」
-        var stripRight = [StripSegment("上下文 ", bold: false)]
-        if let used = last?.contextUsed {
-            stripRight.append(StripSegment(Format.tokFmt(Double(used)), bold: true))
-            if let max = m?.contextMax {
-                stripRight.append(StripSegment(" / \(Format.tokFmt(Double(max)))", bold: false))
-            }
-        }
+        let stripRight = Self.contextStrip(last: last, contextMax: m?.contextMax)
         let output = last?.completionTokens.map { Format.tokFmt(Double($0)) }
         let cached = last?.cachedTokens
         let hit = last.flatMap { l -> Int? in
@@ -498,10 +627,9 @@ public struct PanelViewModel: Equatable, Sendable {
             stripLeft: modelName,
             stripRight: stripRight,
             cap: "平均速度", pill: true,
-            bigInt: i, bigDec: d, whole: false, unit: "tok/s",
+            bigInt: i, bigDec: d, whole: false, unit: "tok/s", muted: false,
             arc: .value, arcTarget: target,
             ghostFraction: last?.decodeTps.map(Gauge.valueToFraction),
-            cometPhase: nil,
             showSpark: tracker.sparkSamples.count > 5, spark: tracker.sparkSamples,
             message: nil,
             cards: [

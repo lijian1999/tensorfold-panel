@@ -327,7 +327,7 @@ struct MetricsTests {
 
         let prefill = try decodeFixture("prefill.json")
         #expect(prefill.state == "prefill")
-        #expect(prefill.current?.elapsedS == 2.3)
+        #expect(prefill.current?.elapsedS == 4.6)
 
         let decode = try decodeFixture("decode.json")
         #expect(decode.current?.elapsedS == 3.21)
@@ -566,23 +566,25 @@ struct PanelViewModelTests {
 
     // MARK: prefill
 
-    @Test("prefill：已用时本地插值 + 扫动弧段")
+    @Test("prefill：3 秒以后显示已用时，圆弧不动")
     func prefill() throws {
         let tracker = try onlineTracker("prefill.json", at: 10)
         let v = PanelViewModel.make(tracker: tracker, now: 11, memory: mem)
         #expect(v.state == .prefill)
         #expect(v.stateName == "预填充中")
         #expect(v.stripLeft == "Qwen3.8-27B")
-        // 已用时 = 2.3 + (11 − 10) = 3.3 > 1.5 → 提示较长
+        // 已用时 = 4.6 + (11 − 10) = 5.6 ≥ 3 → 接管大数字
         #expect(v.stripRight == [StripSegment("提示较长，可能需要几秒")])
         #expect(v.cap == "已用时")
         #expect(v.whole)
-        #expect(v.bigInt == "3")
-        #expect(v.bigDec == ".3")
+        #expect(v.bigInt == "5")
+        #expect(v.bigDec == ".6")
         #expect(v.unit == "秒")
-        #expect(v.arc == .comet)
-        // (3.3 mod 1.5)/1.5 = 0.2
-        #expect(abs(v.cometPhase! - 0.2) < 1e-9)
+        // 圆弧不动，小点留在上次平均位置
+        #expect(v.arc == .rest)
+        #expect(v.ghostFraction == Gauge.valueToFraction(58.2))
+        #expect(v.arcTarget == 58.2)
+        #expect(!v.muted)
         // 卡片：输出 —、首字 —（等待首个 token）、内存
         #expect(v.cards[0].label == "输出")
         #expect(v.cards[0].value == "—")
@@ -595,16 +597,15 @@ struct PanelViewModelTests {
         #expect(v.cards[2].value == "21.4")
     }
 
-    @Test("prefill：刚进入时状态条右侧为空")
+    @Test("prefill：前 3 秒保持空闲画面，状态条显示已用时")
     func prefillShort() throws {
-        // 已用时 = 0.3 + 0.7 = 1.0 < 1.5 → 不提示
+        // 已用时 = 0.3 + 0.7 = 1.0 < 3 → 短预填充
         var m = try decodeFixture("prefill.json")
         m.current?.elapsedS = 0.3
         var tracker = ConnectionTracker(bootTime: 0)
         tracker.recordSuccess(m, at: 10)
         let v = PanelViewModel.make(tracker: tracker, now: 10.7, memory: mem)
-        #expect(v.stripRight.isEmpty)
-        #expect(v.cometPhase! < 1)
+        #expect(v.stripRight == [StripSegment("已用时 "), StripSegment("1.0", bold: true), StripSegment(" s")])
     }
 
     // MARK: decode
@@ -705,5 +706,232 @@ struct PanelViewModelTests {
         tracker.sparkSamples = (0..<6).map { _ in SparkSample(raw: 50, smooth: 55) }
         v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
         #expect(v.showSpark)
+    }
+}
+
+@Suite("一轮模式与短预填充")
+struct RoundModeTests {
+    let mem: (usedGB: Double, totalGB: Double) = (21.4, 64)
+
+    /// 成功读到指定 fixture，在线
+    func online(_ fixture: String, at t: Double) throws -> ConnectionTracker {
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture(fixture), at: t)
+        return tracker
+    }
+
+    @Test("Metrics 解码 round 全部 5 个字段；没有 round 键时为 nil；7 个新 fixture 都能解码")
+    func roundDecoding() throws {
+        let json = #"{"round": {"requests": 9, "output_tokens": 1834, "decode_tps_avg": 78.4, "elapsed_s": 96.5, "active": true}}"#
+        let m = try JSONDecoder().decode(Metrics.self, from: Data(json.utf8))
+        #expect(m.round?.requests == 9)
+        #expect(m.round?.outputTokens == 1834)
+        #expect(m.round?.decodeTpsAvg == 78.4)
+        #expect(m.round?.elapsedS == 96.5)
+        #expect(m.round?.active == true)
+        // 没有 round 键时为 nil
+        let empty = try JSONDecoder().decode(Metrics.self, from: Data("{}".utf8))
+        #expect(empty.round == nil)
+        // 7 个新 fixture 都能解码
+        let prefillShort = try decodeFixture("prefill-short.json")
+        #expect(prefillShort.state == "prefill")
+        #expect(prefillShort.round == nil)
+        let rPrefillShort = try decodeFixture("round-prefill-short.json")
+        #expect(rPrefillShort.round?.requests == 9)
+        #expect(rPrefillShort.current?.elapsedS == 0.8)
+        let rPrefillLong = try decodeFixture("round-prefill-long.json")
+        #expect(rPrefillLong.current?.elapsedS == 4.4)
+        #expect(rPrefillLong.round?.active == true)
+        let rDecode = try decodeFixture("round-decode.json")
+        #expect(rDecode.state == "decode")
+        #expect(rDecode.round?.decodeTpsAvg == 78.4)
+        let rDone = try decodeFixture("round-done.json")
+        #expect(rDone.state == "done")
+        #expect(rDone.round?.requests == 10)
+        let rIdle = try decodeFixture("round-idle.json")
+        #expect(rIdle.state == "idle")
+        #expect(rIdle.round?.active == true)
+        let rIdleEnded = try decodeFixture("round-idle-ended.json")
+        #expect(rIdleEnded.round?.active == false)
+    }
+
+    @Test("短预填充（单请求）：画面与 idle 相同，muted，只有状态条变化")
+    func shortPrefillSingle() throws {
+        let v = PanelViewModel.make(tracker: try online("prefill-short.json", at: 10), now: 10, memory: mem)
+        let idle = PanelViewModel.make(tracker: try online("idle.json", at: 10), now: 10, memory: mem)
+        #expect(v.state == .prefill)
+        #expect(v.stateName == "预填充中")
+        #expect(v.muted)
+        #expect(v.arc == .rest)
+        // 状态条右侧：已用时 1.2 s（now = fetchedAt）
+        #expect(v.stripRight == [StripSegment("已用时 "), StripSegment("1.2", bold: true), StripSegment(" s")])
+        // 其余与用同一份 last 生成的 idle 画面完全相同
+        #expect(v.cap == idle.cap)
+        #expect(v.pill == idle.pill)
+        #expect(v.bigInt == idle.bigInt)
+        #expect(v.bigDec == idle.bigDec)
+        #expect(v.ghostFraction == idle.ghostFraction)
+        #expect(v.arcTarget == idle.arcTarget)
+        #expect(v.cards == idle.cards)
+    }
+
+    @Test("阈值边界：已用时 2.99 为短预填充，3.0 为长预填充")
+    func prefillThreshold() throws {
+        var m = try decodeFixture("prefill.json")
+        var tracker = ConnectionTracker(bootTime: 0)
+        m.current?.elapsedS = 2.99
+        tracker.recordSuccess(m, at: 10)
+        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cap == "上次平均")
+        m.current?.elapsedS = 3.0
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+    }
+
+    @Test("一轮判定：requests 1 且进行中 → 一轮模式；idle → 单请求；没有 round → 单请求")
+    func roundDetection() throws {
+        // round.requests == 1 且 state 为 prefill（进行中）→ roundCount 2 → 一轮模式
+        var m = try decodeFixture("idle.json")
+        m.state = "prefill"
+        m.round = .init(requests: 1, active: true)
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cards[0].label == "本轮请求")
+        #expect(v.cards[0].value == "2")
+        // round.requests == 1 且 state 为 idle（不进行中）→ roundCount 1 → 单请求
+        m = try decodeFixture("idle.json")
+        m.round = .init(requests: 1, active: true)
+        tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cards[0].label == "输出")
+        // 没有 round 且 state 为 decode → 单请求
+        tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture("decode.json"), at: 10)
+        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.cards[0].label == "输出")
+    }
+
+    @Test("round-decode：右侧换一轮卡片，其余与单请求 decode 相同")
+    func roundDecode() throws {
+        let v = PanelViewModel.make(tracker: try online("round-decode.json", at: 10), now: 10, memory: mem)
+        // 单请求 decode 对照
+        let single = PanelViewModel.make(tracker: try online("decode.json", at: 10), now: 10, memory: mem)
+        #expect(v.muted == false)
+        #expect(v.cap == "解码速度")
+        #expect(v.arcTarget == single.arcTarget)
+        #expect(v.bigInt == single.bigInt)
+        #expect(v.stripRight == single.stripRight)
+        // 本轮请求：9 + 1（进行中）= 10 次；用时 96.5 秒 → 1 分钟
+        #expect((v.cards[0].label, v.cards[0].value, v.cards[0].unit, v.cards[0].foot)
+            == ("本轮请求", "10", "次", "用时 1 分钟"))
+        // 累计输出：1834 + 312 = 2146 → 2.1K
+        #expect((v.cards[1].label, v.cards[1].value, v.cards[1].unit) == ("累计输出", "2.1K", "tok"))
+        // 本轮平均：78.4
+        #expect((v.cards[2].label, v.cards[2].value, v.cards[2].unit, v.cards[2].foot)
+            == ("本轮平均", "78.4", "", "tok/s"))
+    }
+
+    @Test("round-done：灰色画面显示本轮平均，状态条仍是上下文")
+    func roundDone() throws {
+        let v = PanelViewModel.make(tracker: try online("round-done.json", at: 10), now: 10, memory: mem)
+        #expect(v.state == .done)
+        #expect(v.stateName == "完成")
+        #expect(v.cap == "本轮平均")
+        #expect(v.pill)
+        #expect(v.bigInt == "79")
+        #expect(v.bigDec == ".1")
+        #expect(v.muted)
+        #expect(v.arc == .rest)
+        #expect(v.ghostFraction == Gauge.valueToFraction(79.1))
+        #expect(v.cards[0].value == "10")
+        #expect(v.stripRight.first == StripSegment("上下文 "))
+    }
+
+    @Test("round-idle：状态名空闲，状态条右侧为空，卡片为一轮三项")
+    func roundIdle() throws {
+        let v = PanelViewModel.make(tracker: try online("round-idle.json", at: 10), now: 10, memory: mem)
+        #expect(v.stateName == "空闲")
+        #expect(v.stripRight.isEmpty)
+        #expect(v.cards.map(\.label) == ["本轮请求", "累计输出", "本轮平均"])
+        #expect(v.cards[1].value == "2.1K")
+    }
+
+    @Test("round-idle-ended：本轮已结束 → 上轮")
+    func roundIdleEnded() throws {
+        let v = PanelViewModel.make(tracker: try online("round-idle-ended.json", at: 10), now: 10, memory: mem)
+        #expect(v.cap == "上轮平均")
+        #expect(v.cards.map(\.label) == ["上轮请求", "上轮输出", "上轮平均"])
+    }
+
+    @Test("round-prefill-short：一轮卡片 + 状态条已用时 0.8")
+    func roundPrefillShort() throws {
+        let v = PanelViewModel.make(tracker: try online("round-prefill-short.json", at: 10), now: 10, memory: mem)
+        #expect(v.cards[0].value == "10")
+        #expect(v.cap == "本轮平均")
+        #expect(v.bigInt == "78")
+        #expect(v.stripRight == [StripSegment("已用时 "), StripSegment("0.8", bold: true), StripSegment(" s")])
+    }
+
+    @Test("round-prefill-long：接管已用时，卡片仍为一轮卡片，小点在本轮平均位置")
+    func roundPrefillLong() throws {
+        let v = PanelViewModel.make(tracker: try online("round-prefill-long.json", at: 10), now: 10, memory: mem)
+        #expect(v.cap == "已用时")
+        #expect(v.bigInt == "4")
+        #expect(v.bigDec == ".4")
+        #expect(v.muted == false)
+        #expect(v.cards.map(\.label) == ["本轮请求", "累计输出", "本轮平均"])
+        #expect(v.ghostFraction == Gauge.valueToFraction(78.4))
+    }
+
+    @Test("一轮模式下 decode_tps_avg 为 null：大数字 —、无残影、平均卡 pending")
+    func roundAvgNull() throws {
+        var m = try decodeFixture("round-idle.json")
+        m.round?.decodeTpsAvg = nil
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        let v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.bigInt == "—")
+        #expect(!v.pill)
+        #expect(v.ghostFraction == nil)
+        #expect(v.cards[2].label == "本轮平均")
+        #expect(v.cards[2].pending)
+    }
+
+    @Test("淡入键：一轮模式里中间和右侧不随状态变化，单请求 decode 与 done 右侧不同")
+    func fadeKeys() throws {
+        let done = PanelViewModel.make(tracker: try online("round-done.json", at: 10), now: 10, memory: mem)
+        let idle = PanelViewModel.make(tracker: try online("round-idle.json", at: 10), now: 10, memory: mem)
+        let short = PanelViewModel.make(tracker: try online("round-prefill-short.json", at: 10), now: 10, memory: mem)
+        let decode = PanelViewModel.make(tracker: try online("round-decode.json", at: 10), now: 10, memory: mem)
+        let long = PanelViewModel.make(tracker: try online("round-prefill-long.json", at: 10), now: 10, memory: mem)
+        // 一轮模式：done / idle / 短预填充三者中间淡入键相同，decode 不同
+        #expect(done.centerFadeKey == idle.centerFadeKey)
+        #expect(done.centerFadeKey == short.centerFadeKey)
+        #expect(decode.centerFadeKey != done.centerFadeKey)
+        // 一轮模式：decode / done / idle / 短预填充 / 长预填充右侧淡入键全部相同
+        #expect(done.cardsFadeKey == idle.cardsFadeKey)
+        #expect(done.cardsFadeKey == short.cardsFadeKey)
+        #expect(done.cardsFadeKey == decode.cardsFadeKey)
+        #expect(done.cardsFadeKey == long.cardsFadeKey)
+        // 单请求：decode 与 done 的右侧标签不同
+        let sDone = PanelViewModel.make(tracker: try online("done.json", at: 10), now: 10, memory: mem)
+        let sDecode = PanelViewModel.make(tracker: try online("decode.json", at: 10), now: 10, memory: mem)
+        #expect(sDone.cardsFadeKey != sDecode.cardsFadeKey)
+    }
+
+    @Test("muted：单请求 idle 为 true，done / decode / offline 为 false")
+    func muted() throws {
+        #expect(PanelViewModel.make(tracker: try online("idle.json", at: 10), now: 10, memory: mem).muted)
+        #expect(PanelViewModel.make(tracker: try online("done.json", at: 10), now: 10, memory: mem).muted == false)
+        #expect(PanelViewModel.make(tracker: try online("decode.json", at: 10), now: 10, memory: mem).muted == false)
+        var tracker = ConnectionTracker(bootTime: 100)
+        tracker.recordSuccess(try decodeFixture("idle.json"), at: 101)
+        tracker.recordFailure(at: 150)
+        tracker.recordFailure(at: 150.3)
+        tracker.recordFailure(at: 150.6)
+        #expect(PanelViewModel.make(tracker: tracker, now: 151, memory: mem).muted == false)
     }
 }

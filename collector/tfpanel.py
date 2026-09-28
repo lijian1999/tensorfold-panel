@@ -15,6 +15,7 @@ import functools
 import importlib.util
 import inspect
 import json
+import math
 import os
 import sys
 import threading
@@ -27,6 +28,8 @@ METRICS_HOST = "127.0.0.1"
 METRICS_DEFAULT_PORT = 8081
 # tensorfold 设置好 MLX 环境变量之后才会 import 的模块名
 APP_MODULE = "tensorfold.server.app"
+# “一轮”统计：距上次活动结束超过该间隔（秒）就另起一轮
+ROUND_GAP_DEFAULT_S = 60.0
 
 
 # ---------------------------------------------------------------- 增量文字
@@ -74,6 +77,12 @@ class _Request:
         self.peak = 0.0                   # 解码 1 秒后的峰值速度
 
 
+def _new_round(started):
+    """新一轮数据：started 为本轮开始时刻（clock），各项计数清零。"""
+    return {"started": started, "requests": 0, "output_tokens": 0,
+            "avg_tokens": 0.0, "decode_secs": 0.0}
+
+
 # ---------------------------------------------------------------- 采集器
 
 
@@ -81,15 +90,19 @@ class Collector:
     """挂在 chat() 外面的指标采集器。构造参数可注入，方便测试。"""
 
     def __init__(self, clock=time.perf_counter, done_hold_s=4.0,
-                 window_s=2.5, tick_s=0.1, start_worker=True):
+                 window_s=2.5, tick_s=0.1, start_worker=True,
+                 round_gap_s=60.0):
         self.clock = clock
         self.done_hold_s = done_hold_s    # “完成”状态保持多久
         self.window_s = window_s          # 实时速度统计窗口
         self.tick_s = tick_s              # 换算线程周期
+        self.round_gap_s = round_gap_s    # “一轮”的间隔阈值（秒）
         self._requests = {}               # id(req) -> _Request
-        self._lock = threading.Lock()     # 保护 _requests / last / totals
+        self._lock = threading.Lock()     # 保护 _requests / last / totals / 一轮数据
         self.last = None                  # 最近一次成功完成的成绩
         self.last_done_time = None        # 完成时刻（clock）
+        self.last_activity = None         # 最近一次活动结束时刻（finish/fail，clock）
+        self._round = None                # 本轮数据；None = 还没有请求 begin 过
         self.totals = {"requests": 0, "peak_tps": 0.0}
         # 引擎实例信息（拿到 ChatApp 实例后填充）
         self.engine_ready = False
@@ -126,6 +139,14 @@ class Collector:
         """请求开始，返回请求记录。"""
         req = _Request(self.clock(), streaming)
         with self._lock:
+            # 在把新请求加入 _requests 之前判断：
+            # 当前没有进行中的请求，且距上次活动结束超过阈值 → 开始新的一轮
+            if not self._requests and (self.last_activity is None
+                                       or req.start_time - self.last_activity
+                                       > self.round_gap_s):
+                self._round = None
+            if self._round is None:
+                self._round = _new_round(req.start_time)
             self._requests[id(req)] = req
         return req
 
@@ -141,21 +162,40 @@ class Collector:
                 req.first_delta_time = now
 
     def fail(self, req):
-        """请求抛异常：直接丢弃，不更新 last、不进入 done。"""
+        """请求抛异常：直接丢弃，不更新 last、不进入 done，只刷新 last_activity。"""
+        now = self.clock()
         with self._lock:
             self._requests.pop(id(req), None)
+            self.last_activity = now
 
     def finish(self, req, reply=None):
-        """请求正常结束：用成绩单生成 last。"""
+        """请求正常结束：用成绩单生成 last，并更新本轮统计。"""
+        now = self.clock()
         with self._lock:
             self._requests.pop(id(req), None)
-        now = self.clock()
         last = self._last_from_reply(reply)
         with self._lock:
             self.last = last
             self.last_done_time = now
             self.totals["requests"] += 1
             self.totals["peak_tps"] = max(self.totals["peak_tps"], req.peak)
+            self.last_activity = now
+            if self._round is not None:
+                self._accumulate_round(reply)
+
+    def _accumulate_round(self, reply):
+        """按成绩单更新本轮统计（调用方必须持 self._lock）。"""
+        reply = reply if isinstance(reply, dict) else {}
+        runtime = self._sub(reply, "runtime") or {}
+        completion = self._int_or_none(reply.get("completion_tokens"))
+        tps = self._num_or_none(runtime.get("tokens_per_second"))
+        self._round["requests"] += 1
+        if completion is not None:
+            self._round["output_tokens"] += completion
+        if (completion is not None and tps is not None
+                and completion > 0 and tps > 0):
+            self._round["avg_tokens"] += completion
+            self._round["decode_secs"] += completion / tps
 
     # ---------------- 换算线程 ----------------
 
@@ -314,7 +354,31 @@ class Collector:
             last = self.last
             requests_n = self.totals["requests"]
             total_peak = self.totals["peak_tps"]
+            round_data = None if self._round is None else dict(self._round)
+            last_activity = self.last_activity
+            in_progress = bool(self._requests)
         cw = self.context_window
+        round_out = None
+        if round_data is not None:
+            if in_progress:
+                elapsed = now - round_data["started"]
+            elif last_activity is not None:
+                elapsed = last_activity - round_data["started"]
+            else:
+                elapsed = 0.0
+            if round_data["decode_secs"] > 0:
+                avg = round(round_data["avg_tokens"] / round_data["decode_secs"], 3)
+            else:
+                avg = None
+            round_out = {
+                "requests": round_data["requests"],
+                "output_tokens": round_data["output_tokens"],
+                "decode_tps_avg": avg,
+                "elapsed_s": round(max(0.0, elapsed), 3),
+                "active": in_progress or (last_activity is not None
+                                          and now - last_activity
+                                          <= self.round_gap_s),
+            }
         return {
             "version": 1,
             "state": self.state(now),
@@ -330,6 +394,7 @@ class Collector:
                 "peak_tps": round(total_peak, 3),
                 "uptime_s": int(time.time() - self._wall_start),
             },
+            "round": round_out,
         }
 
     # ---------------- 成绩单 -> last ----------------
@@ -617,8 +682,21 @@ def decide_initial_hook_state(module_name=APP_MODULE):
     return "pending" if spec is not None else "missing"
 
 
+def round_gap_from_env(environ):
+    """TFPANEL_ROUND_GAP_S（浮点秒数）；没设、解析失败、不是正数时用 60.0。"""
+    raw = environ.get("TFPANEL_ROUND_GAP_S")
+    if raw is None:
+        return ROUND_GAP_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return ROUND_GAP_DEFAULT_S
+    return value if math.isfinite(value) and value > 0 else ROUND_GAP_DEFAULT_S
+
+
 def main(argv):
-    collector = Collector()  # 记录启动时间（uptime_s）、启动换算线程
+    collector = Collector(round_gap_s=round_gap_from_env(os.environ))
+    # 记录启动时间（uptime_s）、启动换算线程
     collector.tensorfold_version = _tensorfold_version()
     force_fail = os.environ.get("TFPANEL_FORCE_HOOK_FAIL") == "1"
     state = decide_initial_hook_state()

@@ -14,6 +14,7 @@ public struct Metrics: Decodable, Sendable {
     public var current: Current?
     public var last: Last?
     public var totals: Totals?
+    public var round: Round?
 
     public struct Hooks: Decodable, Sendable {
         public var chat: String?
@@ -117,6 +118,37 @@ public struct Metrics: Decodable, Sendable {
         }
     }
 
+    /// 当前这一轮（连续请求）；还没有任何请求时为 null
+    public struct Round: Decodable, Sendable {
+        public var requests: Int?
+        public var outputTokens: Int?
+        public var decodeTpsAvg: Double?
+        public var elapsedS: Double?
+        public var active: Bool?
+
+        public init(
+            requests: Int? = nil,
+            outputTokens: Int? = nil,
+            decodeTpsAvg: Double? = nil,
+            elapsedS: Double? = nil,
+            active: Bool? = nil
+        ) {
+            self.requests = requests
+            self.outputTokens = outputTokens
+            self.decodeTpsAvg = decodeTpsAvg
+            self.elapsedS = elapsedS
+            self.active = active
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requests
+            case outputTokens = "output_tokens"
+            case decodeTpsAvg = "decode_tps_avg"
+            case elapsedS = "elapsed_s"
+            case active
+        }
+    }
+
     // 接口字段为蛇形命名，统一映射成驼峰属性
     private enum CodingKeys: String, CodingKey {
         case version
@@ -129,6 +161,7 @@ public struct Metrics: Decodable, Sendable {
         case current
         case last
         case totals
+        case round
     }
 
     public init(
@@ -141,7 +174,8 @@ public struct Metrics: Decodable, Sendable {
         hooks: Hooks? = nil,
         current: Current? = nil,
         last: Last? = nil,
-        totals: Totals? = nil
+        totals: Totals? = nil,
+        round: Round? = nil
     ) {
         self.version = version
         self.state = state
@@ -153,5 +187,6 @@ public struct Metrics: Decodable, Sendable {
         self.current = current
         self.last = last
         self.totals = totals
+        self.round = round
     }
 }
