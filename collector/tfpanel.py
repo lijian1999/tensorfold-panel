@@ -67,7 +67,7 @@ class _Request:
 
     __slots__ = ("start_time", "streaming", "deltas", "consumed",
                  "total_tokens", "events", "first_delta_time", "peak",
-                 "prompt_tokens")
+                 "prompt_tokens", "job", "job_seen", "first_token_time")
 
     def __init__(self, start_time, streaming):
         self.start_time = start_time      # clock 时间
@@ -79,6 +79,9 @@ class _Request:
         self.events = deque()             # 窗口内的 token 事件 [(时间, 数量)]，数量可为小数
         self.first_delta_time = None      # 第一个增量到达的时间
         self.peak = 0.0                   # 解码 1 秒后的峰值速度
+        self.job = None                   # 最近一次 attach 的调度器 job
+        self.job_seen = 0                 # 已经计入的引擎 token 数
+        self.first_token_time = None      # 换算线程第一次看到引擎 token 数 > 0 的时刻
 
 
 def _new_round(started):
@@ -165,6 +168,15 @@ class Collector:
             if req.first_delta_time is None:
                 req.first_delta_time = now
 
+    def attach_job(self, req, job):
+        """记下本请求的调度器 job（供换算线程直接数引擎生成的 token）。
+
+        抢占重跑时会用新 job 再 attach：不重置 job_seen——新 job 会把
+        已数过的 token 重新生成一遍，只有超过 job_seen 的部分才是新的。
+        """
+        with self._lock:
+            req.job = job
+
     def set_prompt_tokens(self, req, n):
         """提示 token 数：一个请求只记第一次（render 可能被调用多次）。"""
         with self._lock:
@@ -239,27 +251,51 @@ class Collector:
         return max(active, key=lambda r: r.start_time)
 
     def _convert(self, req, now):
-        """把 req 上次之后新到的增量一次 encode，按各段长度比例分摊。
+        """对 req 做一次 token 换算。
 
-        先切片、换算完再在锁里截掉已消费前缀（而不是把 consumed 记成
-        当前总长）：切片之后、换算期间 on_delta 线程追加的增量留在列表
-        尾部，下一次 tick 照常换算，不会丢。
+        引擎计数模式（attach 过 job）：直接读引擎 job.stream.emitted 的
+        数量，不调分词器，丢弃积压的文字增量。读取出异常时当作本次没有
+        新 token（不退回文字换算，下次 tick 再读）。
+
+        文字换算模式（job 为 None）：先切片、换算完再在锁里截掉已消费
+        前缀（而不是把 consumed 记成当前总长）：切片之后、换算期间
+        on_delta 线程追加的增量留在列表尾部，下一次 tick 照常换算，
+        不会丢。
         """
-        with self._lock:
-            new = req.deltas[req.consumed:]
-        if new:
-            text = "".join(seg for _, seg in new)
-            if text:
-                n = self._count_tokens(text)
-                if n:
-                    for t, seg in new:
-                        if seg:
-                            self._add_event(req, t, n * len(seg) / len(text), now)
+        if req.job is not None:
+            try:
+                stream = req.job.stream
+                n = 0 if stream is None else len(stream.emitted)
+            except Exception:
+                n = None  # 读失败：本次没有新 token，不调分词器
+            if n is not None:
+                new = n - req.job_seen
+                if new > 0:
+                    self._add_event(req, now, new, now)
+                    with self._lock:
+                        req.job_seen = n
+                        if req.first_token_time is None:
+                            req.first_token_time = now
+                with self._lock:
+                    del req.deltas[:len(req.deltas)]  # 丢弃积压的文字
+                    req.consumed = 0
+        else:
             with self._lock:
-                del req.deltas[:len(new)]  # 只截已换算前缀，保留换算期间新追加的增量
-                req.consumed = 0
-        if req.first_delta_time is not None:
-            if now - req.first_delta_time >= 1.0:
+                new = req.deltas[req.consumed:]
+            if new:
+                text = "".join(seg for _, seg in new)
+                if text:
+                    n = self._count_tokens(text)
+                    if n:
+                        for t, seg in new:
+                            if seg:
+                                self._add_event(req, t, n * len(seg) / len(text), now)
+                with self._lock:
+                    del req.deltas[:len(new)]  # 只截已换算前缀，保留换算期间新追加的增量
+                    req.consumed = 0
+        start = self._decode_start(req)
+        if start is not None:
+            if now - start >= 1.0:
                 req.peak = max(req.peak, self._decode_tps(req, now))
 
     def _add_event(self, req, t, n, now):
@@ -298,18 +334,27 @@ class Collector:
             now = self.clock()
         req = self.current_request()
         if req is not None:
-            return "decode" if req.first_delta_time is not None else "prefill"
+            return "decode" if self._decode_start(req) is not None else "prefill"
         with self._lock:
             last_done = self.last_done_time
         if last_done is not None and now - last_done < self.done_hold_s:
             return "done"
         return "idle"
 
+    def _decode_start(self, req):
+        """解码开始时刻：first_delta_time 和 first_token_time 里非 None 的最小值。"""
+        with self._lock:
+            first_delta = req.first_delta_time
+            first_token = req.first_token_time
+        times = [t for t in (first_delta, first_token) if t is not None]
+        return min(times) if times else None
+
     def _decode_tps(self, req, now):
         """最近 window_s 秒的平均速度；分母下限 0.5 秒。"""
-        if req.first_delta_time is None:
+        start = self._decode_start(req)
+        if start is None:
             return 0.0
-        elapsed = now - req.first_delta_time
+        elapsed = now - start
         cutoff = now - self.window_s
         # 换算线程会同时 append/popleft，必须在锁内遍历
         with self._lock:
@@ -318,9 +363,10 @@ class Collector:
 
     def _decode_avg(self, req, now):
         """解码进行满 0.5 秒 = 首字之后的 token 数 ÷ 首字之后的秒数；否则 None。"""
-        if req.first_delta_time is None:
+        start = self._decode_start(req)
+        if start is None:
             return None
-        elapsed = now - req.first_delta_time
+        elapsed = now - start
         if elapsed < 0.5:
             return None
         with self._lock:
@@ -337,16 +383,17 @@ class Collector:
         if req is None:
             current = None
         else:
-            if req.first_delta_time is None:
+            start = self._decode_start(req)
+            if start is None:
                 # 预填充：还在等首字
                 ttft = None
                 tps = 0.0
                 avg = None
                 peak = 0.0
             else:
-                ttft = req.first_delta_time - req.start_time
+                ttft = start - req.start_time
                 tps = self._decode_tps(req, now)
-                if now - req.first_delta_time >= 1.0:
+                if now - start >= 1.0:
                     req.peak = max(req.peak, tps)
                 peak = req.peak
                 avg = self._decode_avg(req, now)
@@ -566,6 +613,33 @@ def patch_chat_app(module, collector, hooks):
     except Exception:
         hooks["render"] = "missing"
 
+    # 尽力包装 Scheduler.submit：chat 在请求线程里同步 submit 任务时，把
+    # job attach 到当前请求，换算线程就能直接数引擎生成的 token
+    try:
+        scheduler_cls = getattr(module, "Scheduler", None)
+        submit = (getattr(scheduler_cls, "submit", None)
+                  if scheduler_cls is not None else None)
+        if not callable(submit):
+            hooks["tokens"] = "missing"
+        else:
+            original_submit = submit
+
+            @functools.wraps(original_submit)
+            def wrapped_submit(self, *args, **kwargs):
+                try:
+                    req = getattr(_TLS, "req", None)
+                    job = args[0] if args else kwargs.get("job")
+                    if req is not None and job is not None:
+                        collector.attach_job(req, job)
+                except Exception:
+                    pass  # 外挂不能影响 submit 的调用
+                return original_submit(self, *args, **kwargs)  # 参数/返回值/异常原样
+
+            scheduler_cls.submit = wrapped_submit
+            hooks["tokens"] = "ok"
+    except Exception:
+        hooks["tokens"] = "missing"
+
     # 尽力包装 __init__：构造完成就记下实例；失败就退回在第一次 chat() 时再记
     try:
         init = getattr(app_class, "__init__", None)
@@ -591,6 +665,7 @@ def run_self_check(module, collector, hooks, version=None, force_fail=False):
     if force_fail or not patch_chat_app(module, collector, hooks):
         hooks["chat"] = "missing"
         hooks["render"] = "missing"
+        hooks["tokens"] = "missing"
         print(f"[tfpanel] 指标未挂载：TensorFold {version or '未知版本'} 的 ChatApp.chat "
               f"已变化，副屏将显示“指标不可用”", file=sys.stderr)
         return False
@@ -746,7 +821,7 @@ def main(argv):
     collector.tensorfold_version = _tensorfold_version()
     force_fail = os.environ.get("TFPANEL_FORCE_HOOK_FAIL") == "1"
     state = decide_initial_hook_state()
-    hooks = {"chat": state, "render": state}
+    hooks = {"chat": state, "render": state, "tokens": state}
     collector.hooks = hooks
 
     def on_app_module(module):

@@ -113,15 +113,17 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | 状态 | 始终 | 按上图的规则切换 | 精确 |
 | 预填充已等待 | 预填充中 | 当前时间减去请求开始时间 | 精确 |
-| 首字时间 | 解码开始后 | 第一段文字到达时间减去开始时间；结束后换成引擎的 `time_to_first_token` | 误差 ≤ 10 ms |
-| 实时解码速度 | 解码中 | 用模型自己的分词器把已输出文字换算成 token 数，取最近 2.5 秒的平均 | 误差 < 1% |
-| 输出 tokens | 解码中 | 同上；结束后换成引擎的 `completion_tokens` | 误差 < 1%，结束后精确 |
+| 首字时间 | 解码开始后 | 第一段文字到达、或第一次看到引擎生成 token（取较早者）的时间减去开始时间；结束后换成引擎的 `time_to_first_token` | 误差 ≤ 100 ms |
+| 实时解码速度 | 解码中 | 每 0.1 秒读引擎已生成的 token 数（`job.stream.emitted` 的长度），取最近 2.5 秒的平均；读不到时退回用分词器换算已输出文字 | 精确（退回时误差 < 1%） |
+| 输出 tokens | 解码中 | 同上；结束后换成引擎的 `completion_tokens` | 精确（退回时误差 < 1%） |
 | 峰值 | 解码中 | 本次请求中平滑后速度的最大值 | 同实时速度 |
 | 本次平均速度 | 解码中，完成后换成精确值 | 首字之后的输出 tokens 除以首字之后经过的时间，和引擎算法相同；完成后换成引擎的 `tokens_per_second` | 解码中误差 < 1%，完成后精确 |
 | 输入 tokens、缓存命中 | 完成后 | 引擎的 `prompt_tokens`、`cached_tokens` | 精确 |
 | 草稿接受率 | 完成后 | 引擎的 `accepted / drafted` | 精确 |
 | 上下文用量 | 预填充开始后 | 预填充和解码中 = 提示 token 数 + 已输出 token 数；提示 token 数来自 `ChatApp.render()` 的返回值（TensorFold 自己渲染的提示，见下）；完成后换成引擎的输入 + 输出。上限为 TensorFold 的 `context_window`（`--context` 参数） | 提示精确，输出同实时换算；完成后精确 |
 | 内存 | 始终 | 副屏程序直接读 macOS 的已用内存 | 和活动监视器一致 |
+
+**为什么直接数引擎 token**（2026-09-28 改）：TensorFold 推送工具调用时，数组 / 对象类型的参数（例如编程代理 `edit` 工具的 `edits`）会缓存到整个值写完才一次性推出。只按推送文字换算时，模型写这段参数的几秒里实时速度会掉到 0，“平均”往下掉，最后文字涌入又造成虚高的峰值。所以采集器包一层 `Scheduler.submit(job)`（在请求线程里同步调用），拿到这个请求的 `job`，换算线程每 0.1 秒读 `len(job.stream.emitted)`：引擎每生成一个 token 就往这个列表追加一个，和成绩单的 `completion_tokens` 计数方式相同。只读列表长度，不碰推理；挂不上时 `hooks.tokens` 为 `missing`，退回按文字换算。
 
 **提示 token 数怎么拿**（2026-09-28 加）：`chat()` 一开头会调用 `ChatApp.render(messages, tools, thinking)` 把对话渲染成 token，返回 `(prompt_ids, history_len)`。采集器再包一层 `render`，只读返回值的长度，不做任何额外计算。`render` 挂不上时（TensorFold 改了这个方法），只有预填充和解码中的上下文不显示，其他照常，`hooks.render` 为 `missing`。直接传 `prompt` 的请求不走 `render`，同样不显示。
 
@@ -154,7 +156,7 @@ stateDiagram-v2
   "model": "Qwen3.8-27B-MLX-4bit",
   "tensorfold_version": "0.3.4.1",
   "context_max": 262144,
-  "hooks": { "chat": "ok", "render": "ok" },
+  "hooks": { "chat": "ok", "render": "ok", "tokens": "ok" },
   "current": {
     "elapsed_s": 3.21,
     "prompt_tokens": 18420,
@@ -189,7 +191,7 @@ stateDiagram-v2
 | --- | --- |
 | `state` | `idle`、`prefill`、`decode`、`done` 之一；“离线”由副屏程序自己判断 |
 | `engine_ready` | 已拿到 TensorFold 的 `ChatApp` 实例为 `true`；模型还在加载时为 `false`（副屏显示“启动中”） |
-| `hooks` | 启动自检结果：`pending`（模型加载中，自检还没运行）、`ok` 或 `missing`；见“更新与维护”。`chat` 是主挂载点，`missing` 时副屏显示“指标不可用”；`render` 只影响预填充和解码中的上下文 |
+| `hooks` | 启动自检结果：`pending`（模型加载中，自检还没运行）、`ok` 或 `missing`；见“更新与维护”。`chat` 是主挂载点，`missing` 时副屏显示“指标不可用”；`render` 只影响预填充和解码中的上下文；`tokens` 挂不上时解码中的 token 数退回按文字换算 |
 | `current` | 当前请求，空闲时为 `null`；这里的 token 数和速度是换算值；`decode_tps_avg` 为本次平均速度（解码满 0.5 秒后才有）；`prompt_tokens` 为本次提示 token 数（精确，拿不到时为 `null`） |
 | `last` | 上一个已完成请求，全部是引擎给的精确值 |
 | `round` | 当前这一轮（定义见“连续请求（一轮）与短预填充”），还没有任何请求时为 `null`：`requests` 本轮已成功完成的请求数（不含进行中的）；`output_tokens` 已完成请求的输出之和；`decode_tps_avg` 本轮平均速度（没有可用成绩时为 `null`）；`elapsed_s` 本轮开始到现在（有请求进行中）或到最后一次请求结束；`active` 有请求进行中或最后一次结束不到 60 秒时为 `true` |

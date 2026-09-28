@@ -126,6 +126,59 @@ def make_render_app_cls(render_len=0, reply=None, exc=None, deltas=(),
                 {"__init__": __init__, "render": render, "chat": chat})
 
 
+class FakeScheduler:
+    """假调度器：记下全部 submit 过的 job。"""
+
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, job):
+        self.jobs.append(job)
+
+
+class FakeStream:
+    """假 LaneStream：引擎每生成一个 token 就 append 一个元素。"""
+
+    def __init__(self):
+        self.emitted = []
+
+
+class FakeJob:
+    """假 ChatJob：stream 先为 None，之后换成带 emitted 列表的对象。"""
+
+    def __init__(self):
+        self.stream = None
+
+
+class BrokenStream:
+    """访问 emitted 会抛异常，模拟读取引擎结构出错。"""
+
+    @property
+    def emitted(self):
+        raise RuntimeError("emitted boom")
+
+
+def make_scheduler_app_cls():
+    """持有 Scheduler 的假 ChatApp：chat 里同步 submit 任务，
+    然后调用 mid(self, job) 回调，让测试在 chat 执行“中途”检查状态。"""
+
+    class App(FakeChatApp):
+        def __init__(self, tokenizer=None, served_name="fake-model",
+                     context_window=4096):
+            FakeChatApp.__init__(self, tokenizer=tokenizer, served_name=served_name,
+                                 context_window=context_window)
+            self.scheduler = FakeScheduler()
+
+        def chat(self, messages, *, on_delta=None, mid=None):
+            self.job = FakeJob()
+            self.scheduler.submit(self.job)
+            if mid is not None:
+                mid(self, self.job)
+            return {"ok": 1}
+
+    return App
+
+
 def fake_module(cls):
     module = types.ModuleType("faketensorfold.app")
     module.ChatApp = cls
@@ -1032,7 +1085,8 @@ class TestPromptTokens(unittest.TestCase):
         app_cls = make_app_cls(reply={"ok": 1})
         module = fake_module(app_cls)
         self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
-        self.assertEqual(hooks, {"chat": "ok", "render": "missing"})
+        self.assertEqual(hooks, {"chat": "ok", "render": "missing",
+                                 "tokens": "missing"})
         self.assertEqual(app_cls().chat([{"role": "user", "content": "hi"}]),
                          {"ok": 1})
         self.assertIsNone(collector.last["prompt_tokens"] if collector.last else None)
@@ -1135,6 +1189,265 @@ class TestPromptTokens(unittest.TestCase):
             t.join(timeout=5)
             server.shutdown()
             server.server_close()
+
+
+class TestEngineTokens(unittest.TestCase):
+    """F1：直接数引擎生成的 token（Scheduler.submit 包装 + job.stream.emitted）。"""
+
+    def _setup(self, scheduler_cls=None):
+        self.clock = FakeClock(0.0)
+        self.collector = make_collector(self.clock)
+        self.hooks = {"chat": "missing", "tokens": "pending"}
+        app_cls = make_scheduler_app_cls()
+        module = fake_module(app_cls)
+        module.Scheduler = (scheduler_cls if scheduler_cls is not None
+                            else FakeScheduler)
+        self.assertTrue(tfpanel.patch_chat_app(module, self.collector, self.hooks))
+        return app_cls
+
+    def test_submit_passthrough_and_hooks_ok(self):
+        """1. hooks.tokens == "ok"；submit 参数原样传入、返回值同对象、异常原样抛出。"""
+
+        class RecordingScheduler:
+            def __init__(self):
+                self.received = None
+                self.exc = None
+
+            def submit(self, job):
+                self.received = job
+                if self.exc is not None:
+                    raise self.exc
+                return "ret"
+
+        self._setup(scheduler_cls=RecordingScheduler)
+        self.assertEqual(self.hooks["tokens"], "ok")
+        sched = RecordingScheduler()
+        job = FakeJob()
+        self.assertEqual(sched.submit(job), "ret")
+        self.assertIs(sched.received, job)
+        sched.submit(job=job)  # 关键字传参也能通过
+        self.assertIs(sched.received, job)
+        boom = ValueError("submit boom")
+        sched.exc = boom
+        with self.assertRaises(ValueError) as ctx:
+            sched.submit(job)
+        self.assertIs(ctx.exception, boom)
+
+    def test_engine_only_counts_tokens(self):
+        """2. 没有任何 on_delta 文字、只有 emitted 增长到 10 → output_tokens == 10，decode。"""
+        app_cls = self._setup()
+        captured = {}
+
+        def mid(app, job):
+            job.stream = FakeStream()
+            job.stream.emitted.extend(["t"] * 10)
+            self.clock.advance(0.5)
+            self.collector.tick()
+            captured["snap"] = self.collector.snapshot()
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        cur = captured["snap"]["current"]
+        self.assertEqual(cur["output_tokens"], 10)
+        self.assertEqual(captured["snap"]["state"], "decode")
+
+    def test_tool_call_cache_no_speed_drop(self):
+        """3. 模拟工具调用缓存：emitted 每 0.5 秒增长 50、持续 3 秒，无文字增量。
+        每次 tick 后 decode_tps > 0，3 秒时 decode_tps == 100.0（2.5 秒窗口 250 ÷ 2.5）。"""
+        app_cls = self._setup()
+        speeds = []
+
+        def mid(app, job):
+            job.stream = FakeStream()
+            for _ in range(6):
+                job.stream.emitted.extend(["t"] * 50)
+                self.clock.advance(0.5)
+                self.collector.tick()
+                speeds.append(self.collector.snapshot()["current"]["decode_tps"])
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        self.assertTrue(all(v > 0 for v in speeds))
+        self.assertAlmostEqual(speeds[-1], 100.0, places=3)
+
+    def test_text_flood_ignored_in_engine_mode(self):
+        """4. 引擎计数模式下大段 on_delta 文字涌入：分词器一次都没被调用，
+        output_tokens 不变，峰值不出现尖峰。"""
+        encode_calls = []
+
+        class CountingTokenizer(FakeTokenizer):
+            def encode(self, text, add_special_tokens=False):
+                encode_calls.append(text)
+                return super().encode(text)
+
+        app_cls = self._setup()
+        app = app_cls(tokenizer=CountingTokenizer())
+        snaps = []
+
+        def mid(app, job):
+            job.stream = FakeStream()
+            job.stream.emitted.extend(["t"] * 10)
+            self.clock.advance(1.0)
+            self.collector.tick()
+            snaps.append(self.collector.snapshot())
+            # 模拟工具调用缓存的文字一次性涌入
+            self.collector.delta(tfpanel._TLS.req, "a word " * 100)
+            self.clock.advance(1.0)
+            self.collector.tick()
+            snaps.append(self.collector.snapshot())
+
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        self.assertEqual(encode_calls, [])  # 分词器从未被调用
+        self.assertEqual(snaps[0]["current"]["output_tokens"], 10)
+        self.assertEqual(snaps[1]["current"]["output_tokens"], 10)
+        # 峰值没有尖峰：涌文字后的 peak 不高于涌文字前的 tps（10 < 20）
+        self.assertLessEqual(snaps[1]["current"]["decode_tps_peak"],
+                             snaps[0]["current"]["decode_tps"])
+
+    def test_stream_none_stays_prefill(self):
+        """5. job.stream 为 None → tick 不报错，output_tokens == 0，仍为 prefill。"""
+        app_cls = self._setup()
+        captured = {}
+
+        def mid(app, job):
+            # stream 保持 None
+            self.clock.advance(1.0)
+            self.collector.tick()  # 不应抛出
+            captured["snap"] = self.collector.snapshot()
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        cur = captured["snap"]["current"]
+        self.assertEqual(cur["output_tokens"], 0)
+        self.assertEqual(captured["snap"]["state"], "prefill")
+
+    def test_preempt_rerun_not_double_counted(self):
+        """6. 抢占重跑：第一个 job 到 30 后 attach 第二个 job，
+        第二个从 0 涨到 45 → output_tokens == 45（不是 75）；涨到 20 时仍是 30。"""
+        app_cls = self._setup()
+        snaps = []
+
+        def mid(app, job):
+            job.stream = FakeStream()
+            job.stream.emitted.extend(["t"] * 30)
+            self.clock.advance(1.0)
+            self.collector.tick()
+            snaps.append(self.collector.snapshot())
+            # 抢占重跑：同一请求线程里 submit 新 job（job_seen 不重置）
+            job2 = FakeJob()
+            app.scheduler.submit(job2)
+            job2.stream = FakeStream()
+            job2.stream.emitted.extend(["t"] * 20)
+            self.clock.advance(1.0)
+            self.collector.tick()
+            snaps.append(self.collector.snapshot())
+            job2.stream.emitted.extend(["t"] * 25)  # 20 → 45
+            self.clock.advance(1.0)
+            self.collector.tick()
+            snaps.append(self.collector.snapshot())
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        self.assertEqual([s["current"]["output_tokens"] for s in snaps],
+                         [30, 30, 45])
+
+    def test_submit_from_other_thread_not_attached(self):
+        """7. 在另一个线程（没有进行中的 chat）调用 submit → 不 attach 到任何请求。"""
+        app_cls = self._setup()
+        app = app_cls()
+        tfpanel._TLS.req = None  # 本线程没有进行中的 chat
+        try:
+            req = self.collector.begin()
+            job = FakeJob()
+            t = threading.Thread(target=lambda: app.scheduler.submit(job))
+            t.start()
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
+            self.assertIsNone(req.job)
+            self.collector.fail(req)
+        finally:
+            del tfpanel._TLS.req
+
+    def test_no_scheduler_in_module(self):
+        """8. 模块里没有 Scheduler → hooks.tokens == "missing"，chat 补丁照常生效。"""
+        app_cls = make_app_cls(reply={"ok": 1})
+        module = fake_module(app_cls)  # 没有 Scheduler
+        collector = make_collector(FakeClock())
+        hooks = {"chat": "missing", "tokens": "pending"}
+        self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
+        self.assertEqual(hooks["chat"], "ok")
+        self.assertEqual(hooks["tokens"], "missing")
+        self.assertEqual(app_cls().chat([{"role": "user", "content": "hi"}]),
+                         {"ok": 1})
+
+    def test_self_check_fail_sets_tokens_missing(self):
+        """9. 自检不通过（强制失败）→ hooks.tokens == "missing"。"""
+        collector = make_collector(FakeClock())
+        hooks = {"chat": "pending", "tokens": "pending"}
+        module = fake_module(make_app_cls(reply={"ok": 1}))
+        module.Scheduler = FakeScheduler
+        self.assertFalse(tfpanel.run_self_check(module, collector, hooks,
+                                                force_fail=True))
+        self.assertEqual(hooks["chat"], "missing")
+        self.assertEqual(hooks["tokens"], "missing")
+
+    def test_ttft_uses_text_delta_when_earlier(self):
+        """10a. 先到文字增量再有引擎 token → ttft_s 用文字增量的时刻。"""
+        app_cls = self._setup()
+        self.clock = FakeClock(100.0)
+        self.collector.clock = self.clock
+        captured = {}
+
+        def mid(app, job):
+            self.clock.t = 100.3
+            self.collector.delta(tfpanel._TLS.req, "x y")  # 第一个文字增量
+            job.stream = FakeStream()
+            self.clock.t = 101.0
+            job.stream.emitted.extend(["t"] * 5)  # 之后才有引擎 token
+            self.collector.tick()
+            captured["snap"] = self.collector.snapshot()
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        self.assertAlmostEqual(captured["snap"]["current"]["ttft_s"], 0.3,
+                              places=3)
+
+    def test_ttft_uses_first_token_tick_when_no_text(self):
+        """10b. 没有文字、只有引擎 token → ttft_s 用第一次看到 token 的 tick 时刻。"""
+        app_cls = self._setup()
+        self.clock = FakeClock(100.0)
+        self.collector.clock = self.clock
+        captured = {}
+
+        def mid(app, job):
+            job.stream = FakeStream()
+            self.clock.t = 101.2
+            job.stream.emitted.extend(["t"] * 5)
+            self.collector.tick()
+            captured["snap"] = self.collector.snapshot()
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        app.chat([{"role": "user", "content": "hi"}], on_delta=None, mid=mid)
+        self.assertAlmostEqual(captured["snap"]["current"]["ttft_s"], 1.2,
+                              places=3)
+
+    def test_emitted_read_error_is_safe(self):
+        """11. 读 emitted 抛异常 → tick 不报错，请求照常完成。"""
+        app_cls = self._setup()
+        captured = {}
+
+        def mid(app, job):
+            job.stream = BrokenStream()
+            self.clock.advance(1.0)
+            self.collector.tick()  # 读取 stream.emitted 抛异常，但应被吞掉
+            captured["snap"] = self.collector.snapshot()
+
+        app = app_cls(tokenizer=FakeTokenizer())
+        out = app.chat([{"role": "user", "content": "hi"}], on_delta=None,
+                       mid=mid)
+        self.assertEqual(out, {"ok": 1})
+        self.assertEqual(captured["snap"]["current"]["output_tokens"], 0)
+        self.assertIsNotNone(self.collector.last)  # 请求照常完成
 
 
 if __name__ == "__main__":
