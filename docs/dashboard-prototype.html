@@ -249,7 +249,17 @@
   .big .dec { font-size: 40px; letter-spacing: -0.01em; margin-left: 1px; }
   .big.whole .dec { font-size: inherit; letter-spacing: inherit; margin-left: 0; }
   .screen[data-muted="1"] .big { color: var(--text-2); }
-  .unit { top: 194px; font-size: 15px; line-height: 18px; font-weight: 600; color: var(--muted); }
+  .cap .cap-unit { color: var(--muted); }
+  .unit { display: none; top: 194px; font-size: 15px; line-height: 18px; font-weight: 600; color: var(--muted); }
+  /* 上下文占用条（替代小曲线和单位行）：长条在上，文字在下 */
+  .ctx { display: none; top: 205px; left: 94px !important; width: 120px !important; flex-direction: column; align-items: stretch; gap: 5px; }
+  .ctx.on { display: flex; }
+  .ctx-bar { position: relative; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; transition: background-color .4s; }
+  .ctx-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 6px; border-radius: 3px; background: var(--text-2); transition: width .4s, background-color .4s; }
+  .ctx.warn .ctx-fill { background: var(--amber); }
+  .ctx.full .ctx-fill { background: var(--danger); }
+  .ctx-text { font-size: 12px; line-height: 14px; color: var(--muted); white-space: nowrap; text-align: center; }
+  .ctx-text b { color: var(--text-2); font-weight: 600; }
   .spark { top: 216px; left: 94px !important; width: 120px !important; height: 26px; opacity: 0; transition: opacity .5s; }
   .spark.on { opacity: 1; }
   .spark .raw { fill: none; stroke: var(--faint); stroke-width: 1; stroke-linejoin: round; }
@@ -343,7 +353,7 @@
 
     <div class="group">
       <div class="group-title">显示</div>
-      <label class="check"><input type="checkbox" id="sparkChk" checked><span>原始速率小曲线<small>淡线 = 原始 1 秒速率（跳动大），实线 = 2.5 秒平滑值</small></span></label>
+      <label class="check"><input type="checkbox" id="ctxLongChk"><span>模拟长会话<small>上下文 +200K，看接近上限时的琥珀色 / 红色</small></span></label>
     </div>
 
     <div class="group">
@@ -373,6 +383,7 @@
         <li><b>平滑</b>：主数字 = 最近 2.5 秒内产出 token 数 ÷ 2.5 秒（开头不足 2.5 秒时按已用时间算，最少按 0.5 秒）；弧线和数字再以约 0.4 秒时间常数缓动。</li>
         <li><b>峰值</b>：只统计解码开始 1 秒之后的平滑值，避免开头的假尖峰。</li>
         <li><b>预填充</b>：本版本拿不到进度和提示长度。前 3 秒画面不变，只有状态条显示「预填充中 · 已用时」；超过 3 秒才把主数字换成已用秒数，并提示「提示较长」。圆弧不动，没有扫动。</li>
+        <li><b>上下文</b>：仪表中央下方是上下文占用条（替代原来的小曲线），下面一行写“上下文 已用 / 上限”，占到 80% 变琥珀色、95% 变红色。预填充一开始就有准确的提示长度，解码时加上已输出的 token 实时增长；空闲和完成时显示上次的值。单位并入标题行，例如“解码速度 · tok/s”。</li>
         <li><b>一轮</b>：上一个请求结束后 60 秒内来的请求算同一轮（编程代理的连续工具调用）。本轮请求 ≥ 2 次时右侧固定为 本轮请求 / 累计输出 / 本轮平均，不在解码中显示时主数字是本轮平均（灰色，精确），不再单独显示完成画面；60 秒没有新请求后改叫「上轮」。</li>
         <li><b>解码</b>：右侧为 输出 / 平均 / 峰值。「平均」= 首字之后的输出 tokens ÷ 首字之后经过的时间，和引擎最终 tok/s 同一算法，会逐渐收敛到完成时的精确值。首字时间放在状态条。第 1 层解码中拿不到接受率，所以不显示。</li>
         <li><b>完成</b>：大数字是引擎给出的本次平均速度（精确值），带「精确」标记；4 秒后淡回空闲（手动选择时停留）。</li>
@@ -415,13 +426,14 @@
           <g class="ticks"></g>
         </svg>
         <div class="center">
-          <div class="cap"><span data-k="cap">上次平均</span><span class="pill">精确</span></div>
+          <div class="cap"><span data-k="cap">上次平均 · tok/s</span><span class="pill">精确</span></div>
           <div class="big"><span data-k="bigInt">58</span><span class="dec" data-k="bigDec">.2</span></div>
           <div class="unit" data-k="unit">tok/s</div>
           <svg class="spark" viewBox="0 0 120 26" width="120" height="26" aria-hidden="true">
             <polyline class="raw" points=""></polyline>
             <polyline class="smooth" points=""></polyline>
           </svg>
+          <div class="ctx"><div class="ctx-bar"><div class="ctx-fill"></div></div><div class="ctx-text"></div></div>
           <div class="offline-msg">
             <div class="t1">引擎离线</div>
             <div class="t2">等待 TensorFold 响应…</div>
@@ -451,7 +463,7 @@
 
   const MODEL = 'Qwen3.8-27B';
   const MEM_TOTAL = 64;
-  const CTX_MAX = 262144;
+  const CTX_MAX = 248320;      // tfpanel serve … --context 248320
   const WINDOW = 2.5;          // 平滑窗口（秒）
   const EASE_TAU = 0.4;        // 弧线/数字缓动时间常数（秒）
   const DONE_HOLD = 4;         // 完成态停留（秒）
@@ -538,6 +550,9 @@
       value: node.querySelector('.dial .value'),
       ghost: node.querySelector('.dial .ghost'),
       center: node.querySelector('.center'),
+      ctx: node.querySelector('.ctx'),
+      ctxFill: node.querySelector('.ctx-fill'),
+      ctxText: node.querySelector('.ctx-text'),
       stats: node.querySelector('.stats'),
       strip: node.querySelector('.strip'),
       pill: node.querySelector('.pill'),
@@ -564,6 +579,7 @@
     spark: [], sparkAt: 0,
     lastFrame: now(),
     swap: null,
+    ctxExtra: 0,
     round: null,     // 一轮：{ t0, requests, out, tokSum, decS, lastEnd }
     agent: null,     // 模拟编程代理：{ i, n, nextAt }
   };
@@ -726,6 +742,7 @@
       state: S.state, stateName: '', stripLeft: MODEL, stripRight: '',
       cap: '', pill: false, bigInt: '', bigDec: '', whole: false, unit: 'tok/s',
       arc: 'rest', ghostF: v2f(S.last.final), rest: S.last.final, muted: false, spark: false,
+      ctx: null,       // 上下文已用 token 数（null = 不显示）
       cards: [],
     };
     const L = S.last;
@@ -825,7 +842,6 @@
         V.cap = '解码速度';
         V.bigInt = String(Math.round(S.display)); V.bigDec = '';
         V.arc = 'value';
-        V.spark = true;
         V.cards = RM ? roundCards() : [
           { l: '输出', v: tokFmt((r.sc.skip || 0) + r.emitted), u: 'tok', f: '' },
           // 本次平均：首字之后的输出 tokens ÷ 首字之后经过的时间（和引擎最终 tok/s 同一算法），前 0.5 秒不显示
@@ -836,12 +852,11 @@
       }
       case 'done': {
         V.stateName = '完成';
-        V.stripRight = `上下文 <b>${ctxFmt(L.ctx)}</b> / 262K`;
+        V.stripRight = `首字 <b>${L.ttft.toFixed(2)}</b> s`;   // 上下文已在仪表下方
         if (RM) { rest(); break; }
         V.cap = '平均速度'; V.pill = true;
         [V.bigInt, V.bigDec] = split1(L.final);
         V.arc = 'value';
-        V.spark = S.spark.length > 5;
         const hit = L.prompt ? Math.round(L.cached / L.prompt * 100) : 0;
         V.cards = [
           { l: '输出', v: tokFmt(L.out), u: 'tok', f: `提示 ${tokFmt(L.prompt)} tok` },
@@ -851,6 +866,11 @@
         break;
       }
     }
+    // 上下文：预填充 = 提示长度（render 钩子，准确）；解码 = 提示 + 已输出；完成 / 空闲 = 上次的 prompt + completion
+    if (S.state === 'prefill') V.ctx = r.sc.prompt;
+    else if (S.state === 'decode') V.ctx = r.sc.prompt + (r.sc.skip || 0) + r.emitted;
+    else if (S.state === 'done' || S.state === 'idle') V.ctx = L.ctx;
+    if (V.ctx !== null) V.ctx = Math.min(CTX_MAX, V.ctx + S.ctxExtra);
     return V;
   }
 
@@ -917,7 +937,8 @@
       setText(scr, 'stateName', V.stateName);
       setText(scr, 'stripLeft', V.stripLeft);
       setText(scr, 'stripRight', V.stripRight, true);
-      setText(scr, 'cap', V.cap);
+      // 标题行 = 标题 · 单位（单位不再单独占一行）
+      setText(scr, 'cap', V.cap && V.unit ? `${V.cap} · ${V.unit}` : V.cap);
       setText(scr, 'bigInt', V.bigInt);
       setText(scr, 'bigDec', V.bigDec);
       setText(scr, 'unit', V.unit);
@@ -931,6 +952,17 @@
       const g = Math.max(0, (V.ghostF ?? 0) * 1000 - 0.5);
       setAttr(scr, 'ghostDash', scr.ghost, 'stroke-dasharray', V.ghostF === null ? '0 3000' : '1 3000');
       setAttr(scr, 'ghostOff', scr.ghost, 'stroke-dashoffset', (-g).toFixed(1));
+      // 上下文条
+      const ctxOn = V.ctx !== null;
+      if (scr.cache.ctxOn !== ctxOn) { scr.cache.ctxOn = ctxOn; scr.ctx.classList.toggle('on', ctxOn); }
+      if (ctxOn) {
+        const frac = V.ctx / CTX_MAX;
+        setAttr(scr, 'ctxW', scr.ctxFill, 'style', `width:${(frac * 100).toFixed(1)}%`);
+        scr.ctx.classList.toggle('warn', frac >= 0.8 && frac < 0.95);
+        scr.ctx.classList.toggle('full', frac >= 0.95);
+        const txt = `上下文 <b>${ctxFmt(V.ctx)}</b> / ${ctxFmt(CTX_MAX)}`;
+        if (scr.cache.ctxT !== txt) { scr.cache.ctxT = txt; scr.ctxText.innerHTML = txt; }
+      }
       // 小曲线
       const sparkOn = V.spark && S.showSpark;
       if (scr.cache.spark !== sparkOn) { scr.cache.spark = sparkOn; scr.spark.classList.toggle('on', sparkOn); }
@@ -1068,7 +1100,7 @@
         if (S.state !== 'idle' && (!S.req || S.req.endless || S.state === 'done')) { S.req = null; setState('idle'); }
       }
     });
-    document.getElementById('sparkChk').addEventListener('change', (e) => { S.showSpark = e.target.checked; });
+    document.getElementById('ctxLongChk').addEventListener('change', (e) => { S.ctxExtra = e.target.checked ? 200000 : 0; });
   }
 
   syncButtons();

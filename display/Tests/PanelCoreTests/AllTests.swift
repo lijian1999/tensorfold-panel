@@ -79,117 +79,6 @@ struct ConnectionTrackerTests {
         #expect(t.lastSuccess?.state == "decode")
     }
 
-    @Test("小曲线：0.1 秒节流")
-    func sparkThrottle() {
-        var t = ConnectionTracker(bootTime: 100)
-        t.recordSuccess(decodeMetrics(state: "idle"), at: 101)
-        t.recordSuccess(decodeMetrics(), at: 102)          // 第一次 decode：1 个样本
-        #expect(t.sparkSamples.count == 1)
-        t.recordSuccess(decodeMetrics(), at: 102.05)       // 距上次 0.05s < 0.1：不追加
-        #expect(t.sparkSamples.count == 1)
-        t.recordSuccess(decodeMetrics(), at: 102.15)       // 距上次 0.15s ≥ 0.1：追加
-        #expect(t.sparkSamples.count == 2)
-        #expect(t.sparkSamples.last?.smooth == 58.4)
-    }
-
-    @Test("小曲线：最多保留 80 个")
-    func sparkCap() {
-        var t = ConnectionTracker(bootTime: 100)
-        var time = 0.0
-        for _ in 0..<200 {
-            time += 0.1
-            t.recordSuccess(decodeMetrics(), at: time)
-        }
-        #expect(t.sparkSamples.count == 80)
-    }
-
-    @Test("小曲线：进入 prefill 清空")
-    func sparkClearedOnPrefill() {
-        var t = ConnectionTracker(bootTime: 100)
-        t.recordSuccess(decodeMetrics(), at: 102)
-        t.recordSuccess(decodeMetrics(), at: 102.15)
-        #expect(t.sparkSamples.count == 2)
-        t.recordSuccess(decodeMetrics(state: "prefill"), at: 103)
-        #expect(t.sparkSamples.isEmpty)
-    }
-
-    @Test("小曲线：raw = 最近 1 秒 output_tokens 增量 ÷ max(0.25, min(1, 已进行秒数))")
-    func sparkRaw() {
-        var t = ConnectionTracker(bootTime: 100)
-        var m1 = decodeMetrics()
-        m1.current?.elapsedS = 3.0
-        m1.current?.outputTokens = 100
-        t.recordSuccess(m1, at: 100)
-        var m2 = decodeMetrics()
-        m2.current?.elapsedS = 3.25
-        m2.current?.outputTokens = 130
-        t.recordSuccess(m2, at: 100.25)
-        let s = t.sparkSamples.last!
-        #expect(s.smooth == 58.4)
-        // 增量 30 ÷ max(0.25, min(1, 3.25 − 0.457)) = 30 ÷ 1 = 30
-        #expect(abs(s.raw - 30) < 1e-9)
-    }
-
-    @Test("小曲线：raw 分母 = 解码已进行秒数（elapsed_s − ttft_s）")
-    func sparkRawDenominator() {
-        var t = ConnectionTracker(bootTime: 0)
-        // 预填充 5 秒、解码 0.5 秒：分母应为 0.5，而不是含预填充的 elapsed_s（→ 1）
-        var m1 = decodeMetrics()
-        m1.current = .init(elapsedS: 5.0, ttftS: 5.0, outputTokens: 100, decodeTps: 50, decodeTpsPeak: nil)
-        t.recordSuccess(m1, at: 10)                    // 首字刚到：首个样本，raw = smooth
-        var m2 = decodeMetrics()
-        m2.current = .init(elapsedS: 5.5, ttftS: 5.0, outputTokens: 125, decodeTps: 50, decodeTpsPeak: nil)
-        t.recordSuccess(m2, at: 10.5)
-        let s = t.sparkSamples.last!
-        // 增量 25 ÷ 0.5 = 50（若误用含预填充的 elapsed_s 则为 25 ÷ 1 = 25）
-        #expect(abs(s.raw - 50) < 1e-9)
-    }
-
-    @Test("小曲线：elapsed_s/ttft_s 缺失时用 t − 首个 decode 样本时间（下限 0.25 秒）")
-    func sparkRawFallback() {
-        var t = ConnectionTracker(bootTime: 0)
-        var m1 = decodeMetrics()
-        m1.current = .init(elapsedS: nil, ttftS: nil, outputTokens: 100, decodeTps: 50, decodeTpsPeak: nil)
-        t.recordSuccess(m1, at: 10)
-        var m2 = decodeMetrics()
-        m2.current = .init(elapsedS: nil, ttftS: nil, outputTokens: 130, decodeTps: 50, decodeTpsPeak: nil)
-        t.recordSuccess(m2, at: 10.15)
-        let s = t.sparkSamples.last!
-        // 增量 30 ÷ max(0.25, min(1, 0.15)) = 30 ÷ 0.25 = 120
-        #expect(abs(s.raw - 120) < 1e-9)
-    }
-
-    @Test("decode → done 保留小曲线样本，新请求才清空")
-    func decodeContinues() {
-        var t = ConnectionTracker(bootTime: 100)
-        t.recordSuccess(decodeMetrics(), at: 100)
-        t.recordSuccess(decodeMetrics(), at: 100.15)
-        t.recordSuccess(decodeMetrics(), at: 100.3)
-        #expect(t.sparkSamples.count == 3)
-        t.recordSuccess(decodeMetrics(), at: 101)          // 仍在 decode：不清空
-        #expect(t.sparkSamples.count == 4)
-        t.recordSuccess(decodeMetrics(state: "done"), at: 102)
-        #expect(t.sparkSamples.count == 4)                 // decode → done：保留
-        t.recordSuccess(decodeMetrics(state: "idle"), at: 107)
-        #expect(t.sparkSamples.count == 4)                 // done → idle：仍保留
-        t.recordSuccess(decodeMetrics(state: "prefill"), at: 108)
-        #expect(t.sparkSamples.isEmpty)                    // 新请求（prefill）：清空
-    }
-
-    @Test("done 画面：有小曲线样本时 showSpark 且 spark 非空")
-    func doneShowsSpark() {
-        var t = ConnectionTracker(bootTime: 100)
-        for i in 0..<8 {
-            t.recordSuccess(decodeMetrics(), at: 100 + Double(i) * 0.15)
-        }
-        #expect(t.sparkSamples.count == 8)
-        t.recordSuccess(decodeMetrics(state: "done"), at: 110)
-        let v = PanelViewModel.make(tracker: t, now: 110, memory: nil)
-        #expect(v.state == .done)
-        #expect(v.showSpark)
-        #expect(!v.spark.isEmpty)
-        #expect(v.spark.count == 8)
-    }
 }
 
 @Suite("Format：与原型 JS 逐字一致")
@@ -625,7 +514,6 @@ struct PanelViewModelTests {
         #expect(v.bigDec == "")
         #expect(v.unit == "tok/s")
         #expect(v.arc == .value)
-        #expect(v.showSpark)
         // 状态条：首字 0.46 s · 内存 21.4 / 64 GB
         #expect(v.stripRight.map(\.text).joined() == "首字 0.46 s · 内存 21.4 / 64 GB")
         #expect(v.stripRight.map(\.bold) == [false, true, false, true, false])
@@ -673,8 +561,8 @@ struct PanelViewModelTests {
         #expect(v.state == .done)
         #expect(v.stateName == "完成")
         #expect(v.stripLeft == "Qwen3.8-27B")
-        // 上下文 632 / 262K
-        #expect(v.stripRight.map(\.text).joined() == "上下文 632 / 262K")
+        // 首字 0.10 s
+        #expect(v.stripRight.map(\.text).joined() == "首字 0.10 s")
         #expect(v.stripRight.map(\.bold) == [false, true, false])
         // 大数字 = 本次平均速度
         #expect(v.cap == "平均速度")
@@ -689,23 +577,16 @@ struct PanelViewModelTests {
         #expect((v.cards[1].label, v.cards[1].value, v.cards[1].unit, v.cards[1].foot)
             == ("缓存命中", "0", "%", "0 tok"))
         #expect((v.cards[2].label, v.cards[2].value, v.cards[2].unit) == ("接受率", "78", "%"))
-        // 样本数 1 ≤ 5 → 不显示小曲线
-        #expect(!v.showSpark)
     }
 
-    @Test("done：contextMax 为空时省略「 / …」；样本数 > 5 显示小曲线")
+    @Test("done：contextMax 为空时不显示上下文条")
     func doneNoContextMax() throws {
         var m = try decodeFixture("done.json")
         m.contextMax = nil
         var tracker = ConnectionTracker(bootTime: 0)
         tracker.recordSuccess(m, at: 10)
-        var v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
-        #expect(v.stripRight.map(\.text).joined() == "上下文 632")
-        #expect(!v.showSpark)
-        // 塞 6 个样本 → showSpark
-        tracker.sparkSamples = (0..<6).map { _ in SparkSample(raw: 50, smooth: 55) }
-        v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
-        #expect(v.showSpark)
+        let v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.context == nil)
     }
 }
 
@@ -834,7 +715,7 @@ struct RoundModeTests {
             == ("本轮平均", "78.4", "", "tok/s"))
     }
 
-    @Test("round-done：灰色画面显示本轮平均，状态条仍是上下文")
+    @Test("round-done：灰色画面显示本轮平均，状态条为首字")
     func roundDone() throws {
         let v = PanelViewModel.make(tracker: try online("round-done.json", at: 10), now: 10, memory: mem)
         #expect(v.state == .done)
@@ -847,7 +728,7 @@ struct RoundModeTests {
         #expect(v.arc == .rest)
         #expect(v.ghostFraction == Gauge.valueToFraction(79.1))
         #expect(v.cards[0].value == "10")
-        #expect(v.stripRight.first == StripSegment("上下文 "))
+        #expect(v.stripRight.first == StripSegment("首字 "))
     }
 
     @Test("round-idle：状态名空闲，状态条右侧为空，卡片为一轮三项")
@@ -933,5 +814,124 @@ struct RoundModeTests {
         tracker.recordFailure(at: 150.3)
         tracker.recordFailure(at: 150.6)
         #expect(PanelViewModel.make(tracker: tracker, now: 151, memory: mem).muted == false)
+    }
+}
+
+@Suite("上下文条与标题行")
+struct ContextBarTests {
+    let mem: (usedGB: Double, totalGB: Double) = (21.4, 64)
+
+    /// 读 fixture → 在线 tracker → 一帧画面
+    func model(_ fixture: String, at t: Double, now: Double? = nil) throws -> PanelViewModel {
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture(fixture), at: t)
+        return PanelViewModel.make(tracker: tracker, now: now ?? t, memory: mem)
+    }
+
+    @Test("Metrics 解码 current.prompt_tokens；两个新 fixture 能解码")
+    func promptTokensDecoding() throws {
+        let decode = try decodeFixture("decode.json")
+        #expect(decode.current?.promptTokens == 18420)
+        #expect(try decodeFixture("decode-ctx-warn.json").current?.promptTokens == 215000)
+        #expect(try decodeFixture("decode-ctx-full.json").current?.promptTokens == 250000)
+    }
+
+    @Test("capText：标题 · 单位；离线时为空")
+    func capText() throws {
+        #expect(try model("decode.json", at: 10).capText == "解码速度 · tok/s")
+        #expect(try model("idle.json", at: 10).capText == "上次平均 · tok/s")
+        #expect(try model("prefill.json", at: 10).capText == "已用时 · 秒")
+        #expect(try model("round-done.json", at: 10).capText == "本轮平均 · tok/s")
+        var tracker = ConnectionTracker(bootTime: 100)
+        tracker.recordSuccess(try decodeFixture("idle.json"), at: 101)
+        tracker.recordFailure(at: 150)
+        tracker.recordFailure(at: 150.3)
+        tracker.recordFailure(at: 150.6)
+        #expect(PanelViewModel.make(tracker: tracker, now: 151, memory: mem).capText == "")
+    }
+
+    @Test("decode：上下文 = 提示 + 已输出，文字三段，normal")
+    func decodeContext() throws {
+        let v = try model("decode.json", at: 10)
+        // 18420 + 312 = 18732
+        #expect(v.context == ContextUsage(used: 18732, limit: 262144))
+        #expect(v.context?.segments.map(\.text) == ["上下文 ", "18.7K", " / 262K"])
+        #expect(v.context?.segments.map(\.bold) == [false, true, false])
+        #expect(v.context?.level == .normal)
+    }
+
+    @Test("预填充只算提示（长短都一样，一轮模式也一样）")
+    func prefillContext() throws {
+        #expect(try model("prefill-short.json", at: 10).context?.used == 1240)
+        #expect(try model("prefill.json", at: 10).context?.used == 35012)
+        #expect(try model("round-prefill-long.json", at: 10).context?.used == 18420)
+        #expect(try model("prefill.json", at: 10).context?.limit == 262144)
+    }
+
+    @Test("idle / done 用 last.context_used")
+    func idleDoneContext() throws {
+        #expect(try model("idle.json", at: 10).context?.used == 592)
+        #expect(try model("done.json", at: 10).context?.used == 632)
+        let r = try decodeFixture("round-done.json")
+        #expect(try model("round-done.json", at: 10).context?.used == r.last?.contextUsed)
+    }
+
+    @Test("warn / full 等级与边界（含 fraction 钳制）")
+    func contextLevels() throws {
+        #expect(try model("decode-ctx-warn.json", at: 10).context?.level == .warn)
+        #expect(try model("decode-ctx-full.json", at: 10).context?.level == .full)
+        #expect(ContextUsage(used: 80, limit: 100).level == .warn)
+        #expect(ContextUsage(used: 79, limit: 100).level == .normal)
+        #expect(ContextUsage(used: 95, limit: 100).level == .full)
+        #expect(ContextUsage(used: 120, limit: 100).fraction == 1)
+    }
+
+    @Test("fillWidth：最小 6 pt（圆点）；used ≤ 0 为 0；上限 120")
+    func fillWidth() {
+        #expect(ContextUsage(used: 632, limit: 262144).fillWidth == 6)
+        #expect(ContextUsage(used: 0, limit: 100).fillWidth == 0)
+        #expect(ContextUsage(used: 50, limit: 100).fillWidth == 60)
+        #expect(ContextUsage(used: 200, limit: 100).fillWidth == 120)
+    }
+
+    @Test("缺数据时不显示上下文条")
+    func contextMissing() throws {
+        // decode 且 promptTokens 为 nil
+        var m = try decodeFixture("decode.json")
+        m.current?.promptTokens = nil
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        #expect(PanelViewModel.make(tracker: tracker, now: 10, memory: mem).context == nil)
+        // contextMax 为 nil
+        m = try decodeFixture("decode.json")
+        m.contextMax = nil
+        tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        #expect(PanelViewModel.make(tracker: tracker, now: 10, memory: mem).context == nil)
+        // offline
+        tracker = ConnectionTracker(bootTime: 100)
+        tracker.recordSuccess(try decodeFixture("idle.json"), at: 101)
+        tracker.recordFailure(at: 150)
+        tracker.recordFailure(at: 150.3)
+        tracker.recordFailure(at: 150.6)
+        #expect(PanelViewModel.make(tracker: tracker, now: 151, memory: mem).context == nil)
+        // unavailable / starting
+        tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture("unavailable.json"), at: 50)
+        #expect(PanelViewModel.make(tracker: tracker, now: 50, memory: mem).context == nil)
+        tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(try decodeFixture("starting.json"), at: 50)
+        #expect(PanelViewModel.make(tracker: tracker, now: 50, memory: mem).context == nil)
+    }
+
+    @Test("完成画面：last.ttft_s 缺失时状态条为 首字 — s")
+    func doneNoTtft() throws {
+        var m = try decodeFixture("done.json")
+        m.last?.ttftS = nil
+        var tracker = ConnectionTracker(bootTime: 0)
+        tracker.recordSuccess(m, at: 10)
+        let v = PanelViewModel.make(tracker: tracker, now: 10, memory: mem)
+        #expect(v.stripRight.map(\.text) == ["首字 ", "—", " s"])
+        #expect(v.stripRight.map(\.bold) == [false, true, false])
     }
 }

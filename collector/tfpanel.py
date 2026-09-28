@@ -30,6 +30,8 @@ METRICS_DEFAULT_PORT = 8081
 APP_MODULE = "tensorfold.server.app"
 # “一轮”统计：距上次活动结束超过该间隔（秒）就另起一轮
 ROUND_GAP_DEFAULT_S = 60.0
+# 记住本线程正在 chat() 里的请求记录，供 render 包装定位当前请求
+_TLS = threading.local()
 
 
 # ---------------------------------------------------------------- 增量文字
@@ -64,11 +66,13 @@ class _Request:
     """一次进行中的 chat() 请求。"""
 
     __slots__ = ("start_time", "streaming", "deltas", "consumed",
-                 "total_tokens", "events", "first_delta_time", "peak")
+                 "total_tokens", "events", "first_delta_time", "peak",
+                 "prompt_tokens")
 
     def __init__(self, start_time, streaming):
         self.start_time = start_time      # clock 时间
         self.streaming = streaming        # 请求带了 on_delta 回调
+        self.prompt_tokens = None         # 提示 token 数（render 返回长度；没拿到则 None）
         self.deltas = []                  # [(时间, 文字)]，按到达顺序
         self.consumed = 0                 # deltas 里已参与换算的条数（换算后截掉归零）
         self.total_tokens = 0.0           # 累计 token 数（首字之后全部，O(1) 维护）
@@ -160,6 +164,12 @@ class Collector:
             req.deltas.append((now, text))
             if req.first_delta_time is None:
                 req.first_delta_time = now
+
+    def set_prompt_tokens(self, req, n):
+        """提示 token 数：一个请求只记第一次（render 可能被调用多次）。"""
+        with self._lock:
+            if req.prompt_tokens is None:
+                req.prompt_tokens = n
 
     def fail(self, req):
         """请求抛异常：直接丢弃，不更新 last、不进入 done，只刷新 last_activity。"""
@@ -342,9 +352,11 @@ class Collector:
                 avg = self._decode_avg(req, now)
             with self._lock:
                 output_tokens = req.total_tokens  # 换算线程会同时累加，在锁内读
+                prompt_tokens = req.prompt_tokens  # 换算线程可能同时写，在锁内读
             current = {
                 "elapsed_s": round(now - req.start_time, 3),
                 "ttft_s": None if ttft is None else round(ttft, 3),
+                "prompt_tokens": prompt_tokens,
                 "output_tokens": int(round(output_tokens)),
                 "decode_tps": round(tps, 3),
                 "decode_tps_peak": round(peak, 3),
@@ -509,17 +521,50 @@ def patch_chat_app(module, collector, hooks):
             req = None
         if req is not None:
             req_holder["req"] = req
+        # 让同线程里的 render 包装能定位本请求；结束后恢复原值
+        prev_tls_req = getattr(_TLS, "req", None)
+        _TLS.req = req
         try:
-            reply = original(self, *args, **kwargs)
-        except BaseException:
+            try:
+                reply = original(self, *args, **kwargs)
+            except BaseException:
+                if req is not None:
+                    _collect_safe(collector.fail, req)
+                raise  # 原样抛出
             if req is not None:
-                _collect_safe(collector.fail, req)
-            raise  # 原样抛出
-        if req is not None:
-            _collect_safe(collector.finish, req, reply)
-        return reply  # 同一个对象，不复制、不修改
+                _collect_safe(collector.finish, req, reply)
+            return reply  # 同一个对象，不复制、不修改
+        finally:
+            _TLS.req = prev_tls_req
 
     app_class.chat = wrapped
+
+    # 尽力包装 render：chat 一开头会调用它渲染提示，返回值第 0 项就是完整提示
+    # token 列表；只读长度，任何异常都吞掉，绝不影响 render 本身
+    try:
+        render = getattr(app_class, "render", None)
+        if not callable(render):
+            hooks["render"] = "missing"
+        else:
+            original_render = render
+
+            @functools.wraps(original_render)
+            def wrapped_render(self, *args, **kwargs):
+                result = original_render(self, *args, **kwargs)  # 异常原样抛出
+                try:
+                    req = getattr(_TLS, "req", None)
+                    if req is not None and isinstance(result, tuple) \
+                            and len(result) >= 1:
+                        # result[0] 支持 len() 时才记；不支持则 TypeError 被吞掉
+                        collector.set_prompt_tokens(req, len(result[0]))
+                except Exception:
+                    pass  # 外挂不能影响 render 的返回值和调用方
+                return result  # 同一个对象，不复制、不修改
+
+            app_class.render = wrapped_render
+            hooks["render"] = "ok"
+    except Exception:
+        hooks["render"] = "missing"
 
     # 尽力包装 __init__：构造完成就记下实例；失败就退回在第一次 chat() 时再记
     try:
@@ -545,6 +590,7 @@ def run_self_check(module, collector, hooks, version=None, force_fail=False):
     """导入钩子的回调：自检不通过（或被强制）时打印提示，不打补丁。"""
     if force_fail or not patch_chat_app(module, collector, hooks):
         hooks["chat"] = "missing"
+        hooks["render"] = "missing"
         print(f"[tfpanel] 指标未挂载：TensorFold {version or '未知版本'} 的 ChatApp.chat "
               f"已变化，副屏将显示“指标不可用”", file=sys.stderr)
         return False
@@ -700,7 +746,7 @@ def main(argv):
     collector.tensorfold_version = _tensorfold_version()
     force_fail = os.environ.get("TFPANEL_FORCE_HOOK_FAIL") == "1"
     state = decide_initial_hook_state()
-    hooks = {"chat": state}
+    hooks = {"chat": state, "render": state}
     collector.hooks = hooks
 
     def on_app_module(module):

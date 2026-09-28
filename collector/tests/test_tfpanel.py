@@ -84,6 +84,48 @@ def make_app_cls(reply=None, exc=None, deltas=()):
     return type("FakeChatApp", (FakeChatApp,), {"chat": chat})
 
 
+_RENDER_DEFAULT = object()  # render 返回值未指定时的占位
+
+
+def make_render_app_cls(render_len=0, reply=None, exc=None, deltas=(),
+                        render_exc=None, render_return=_RENDER_DEFAULT):
+    """在 make_app_cls 基础上加 render：chat 一开头先调用 self.render(...)。
+
+    render 默认返回 (list(range(render_len)), 0)，即 render_len 个 token；
+    可用 render_return 覆盖返回值，render_exc 让 render 抛异常。
+    """
+
+    def __init__(self, tokenizer=None, served_name="fake-model",
+                 context_window=4096):
+        FakeChatApp.__init__(self, tokenizer=tokenizer, served_name=served_name,
+                             context_window=context_window)
+        self.render_calls = []
+
+    def render(self, messages, tools=None, thinking=None):
+        self.render_calls.append((messages, tools, thinking))
+        if render_exc is not None:
+            raise render_exc
+        if render_return is not _RENDER_DEFAULT:
+            return render_return
+        return (list(range(render_len)), 0)
+
+    def chat(self, messages, *, max_tokens=None, temperature=0.0,
+             on_delta=None, tools=None, sampling=None):
+        self.seen.append({"messages": messages, "max_tokens": max_tokens,
+                          "temperature": temperature, "on_delta": on_delta,
+                          "tools": tools, "sampling": sampling})
+        self.render(messages, tools=tools)
+        if exc is not None:
+            raise exc
+        if on_delta is not None:
+            for d in deltas:
+                on_delta(d)
+        return reply
+
+    return type("FakeChatAppWithRender", (FakeChatApp,),
+                {"__init__": __init__, "render": render, "chat": chat})
+
+
 def fake_module(cls):
     module = types.ModuleType("faketensorfold.app")
     module.ChatApp = cls
@@ -797,6 +839,302 @@ class TestRoundGapFromEnv(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(
                     tfpanel.round_gap_from_env({"TFPANEL_ROUND_GAP_S": value}), 60.0)
+
+
+class TestPromptTokens(unittest.TestCase):
+    """render 包装：预填充开始时拿到提示 token 数。"""
+
+    def _setup(self, cls):
+        self.clock = FakeClock()
+        self.collector = make_collector(self.clock)
+        self.hooks = {"chat": "missing", "render": "missing"}
+        module = fake_module(cls)
+        self.assertTrue(tfpanel.patch_chat_app(module, self.collector, self.hooks))
+        self.assertEqual(self.hooks["chat"], "ok")
+        return cls()
+
+    def test_prompt_tokens_visible_mid_chat(self):
+        """1. chat 期间 render 返回 1234 个 token → chat 返回前 snapshot 可见。"""
+        clock = FakeClock()
+        collector = make_collector(clock)
+        hooks = {"chat": "missing", "render": "missing"}
+        mid = {}
+
+        class App(FakeChatApp):
+            def render(self, messages, tools=None, thinking=None):
+                return list(range(1234)), 0
+
+            def chat(self, messages, *, on_delta=None):
+                self.render(messages)
+                mid["snap"] = collector.snapshot()
+                return {"ok": 1}
+
+        self.assertTrue(tfpanel.patch_chat_app(fake_module(App), collector, hooks))
+        self.assertEqual(hooks["render"], "ok")
+        App().chat([{"role": "user", "content": "hi"}])
+        cur = mid["snap"]["current"]
+        self.assertEqual(cur["prompt_tokens"], 1234)
+
+    def test_render_same_object_and_args(self):
+        """2. render 返回值是同一个对象（is），参数原样传到原 render。"""
+        ids = [1, 2, 3]
+        result = (ids, 7)
+        app = self._setup(make_render_app_cls(render_return=result))
+        msgs = [{"role": "user", "content": "hi"}]
+        tools = [{"name": "x"}]
+        out = app.render(msgs, tools=tools, thinking="t")
+        self.assertIs(out, result)
+        self.assertIs(app.render_calls[0][0], msgs)
+        self.assertIs(app.render_calls[0][1], tools)
+        self.assertEqual(app.render_calls[0][2], "t")
+
+    def test_render_exception_propagates_and_chat_fails(self):
+        """3. 原 render 抛出的异常原样抛出，chat 的包装走“失败”分支。"""
+        boom = ValueError("render boom")
+        app = self._setup(make_render_app_cls(render_exc=boom, reply={"ok": 1}))
+        with self.assertRaises(ValueError) as ctx:
+            app.chat([{"role": "user", "content": "hi"}])
+        self.assertIs(ctx.exception, boom)
+        self.assertIsNone(self.collector.last)
+        self.assertIsNone(self.collector.current_request())
+        self.assertEqual(self.collector.totals["requests"], 0)
+        self.assertEqual(self.collector.state(), "idle")  # 不进入 done
+
+    def test_render_outside_chat_is_ignored(self):
+        """4. chat 之外直接调用 render：不影响任何请求，不报错。"""
+        app = self._setup(make_render_app_cls(render_len=77))
+        out = app.render([{"role": "user", "content": "hi"}])
+        self.assertEqual(out[0], list(range(77)))
+        self.assertIsNone(self.collector.current_request())
+        self.assertIsNone(self.collector.last)
+        self.assertEqual(self.collector.snapshot()["current"], None)
+        self.assertIs(getattr(tfpanel._TLS, "req", None), None)  # 未被污染
+
+    def test_only_first_render_counts(self):
+        """5. chat 里调用两次 render（先 100 个、再 50 个）→ 只记第一次。"""
+        clock = FakeClock()
+        collector = make_collector(clock)
+        hooks = {"chat": "missing", "render": "missing"}
+        mid = {}
+
+        class App(FakeChatApp):
+            def render(self, messages, tools=None, thinking=None):
+                self._n = getattr(self, "_n", 0) + 1
+                return list(range(100 if self._n == 1 else 50)), 0
+
+            def chat(self, messages, *, on_delta=None):
+                self.render(messages)
+                self.render(messages)
+                mid["snap"] = collector.snapshot()
+                return {"ok": 1}
+
+        self.assertTrue(tfpanel.patch_chat_app(fake_module(App), collector, hooks))
+        App().chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(mid["snap"]["current"]["prompt_tokens"], 100)
+
+    def test_render_non_tuple_return_ignored(self):
+        """6. render 返回值不是元组 → prompt_tokens 保持 None，chat 照常返回。"""
+        for value in (5, None):
+            with self.subTest(render_return=value):
+                clock = FakeClock()
+                collector = make_collector(clock)
+                hooks = {"chat": "missing", "render": "missing"}
+                mid = {}
+
+                class App(FakeChatApp):
+                    def render(self, messages, tools=None, thinking=None):
+                        return value
+
+                    def chat(self, messages, *, on_delta=None):
+                        self.render(messages)
+                        mid["snap"] = collector.snapshot()
+                        return {"ok": 1}
+
+                self.assertTrue(
+                    tfpanel.patch_chat_app(fake_module(App), collector, hooks))
+                reply = {"ok": 1}
+                app = App()
+                out = app.chat([{"role": "user", "content": "hi"}])
+                self.assertEqual(out, reply)
+                self.assertIsNone(mid["snap"]["current"]["prompt_tokens"])
+
+    def test_tls_restored_after_chat(self):
+        """7. chat 结束后 _TLS.req 恢复成调用前的值（正常返回和抛异常都测）。"""
+        sentinel = object()
+        tfpanel._TLS.req = sentinel
+        try:
+            app = self._setup(make_render_app_cls(render_len=5, reply={"ok": 1}))
+            self.assertEqual(app.chat([{"role": "user", "content": "hi"}]),
+                             {"ok": 1})
+            self.assertIs(tfpanel._TLS.req, sentinel)
+            boom = RuntimeError("boom")
+            app2 = self._setup(make_render_app_cls(render_exc=boom,
+                                                   reply={"ok": 1}))
+            with self.assertRaises(RuntimeError):
+                app2.chat([{"role": "user", "content": "hi"}])
+            self.assertIs(tfpanel._TLS.req, sentinel)
+        finally:
+            del tfpanel._TLS.req
+
+    def test_two_threads_get_their_own_prompt_tokens(self):
+        """8. 两个线程各做一次 chat，render 长度记到各自的请求上（Event 交错）。"""
+        collector = make_collector(FakeClock())
+        hooks = {"chat": "missing", "render": "missing"}
+
+        ev_a = threading.Event()
+        ev_b = threading.Event()
+        captured = {}
+
+        class AppA(FakeChatApp):
+            def render(self, messages, tools=None, thinking=None):
+                ev_a.set()
+                ev_b.wait(timeout=5)
+                captured["a"] = tfpanel._TLS.req
+                return list(range(100)), 0
+
+            def chat(self, messages, *, on_delta=None):
+                self.render(messages)
+                return {"who": "a"}
+
+        class AppB(FakeChatApp):
+            def render(self, messages, tools=None, thinking=None):
+                ev_b.set()
+                ev_a.wait(timeout=5)
+                captured["b"] = tfpanel._TLS.req
+                return list(range(2000)), 0
+
+            def chat(self, messages, *, on_delta=None):
+                self.render(messages)
+                return {"who": "b"}
+
+        module = fake_module(AppA)
+        self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
+        module_b = fake_module(AppB)
+        self.assertTrue(tfpanel.patch_chat_app(module_b, collector, hooks))
+        a, b = AppA(), AppB()
+        ta = threading.Thread(target=lambda: a.chat([{"role": "user"}]))
+        tb = threading.Thread(target=lambda: b.chat([{"role": "user"}]))
+        ta.start()
+        tb.start()
+        ta.join(timeout=5)
+        tb.join(timeout=5)
+        self.assertFalse(ta.is_alive())
+        self.assertFalse(tb.is_alive())
+        self.assertEqual(captured["a"].prompt_tokens, 100)
+        self.assertEqual(captured["b"].prompt_tokens, 2000)
+        self.assertEqual(collector.totals["requests"], 2)
+
+    def test_no_render_method_chat_still_works(self):
+        """9. ChatApp 没有 render → chat 补丁照常生效，hooks.render 为 missing。"""
+        clock = FakeClock()
+        collector = make_collector(clock)
+        hooks = {"chat": "missing", "render": "missing"}
+        app_cls = make_app_cls(reply={"ok": 1})
+        module = fake_module(app_cls)
+        self.assertTrue(tfpanel.patch_chat_app(module, collector, hooks))
+        self.assertEqual(hooks, {"chat": "ok", "render": "missing"})
+        self.assertEqual(app_cls().chat([{"role": "user", "content": "hi"}]),
+                         {"ok": 1})
+        self.assertIsNone(collector.last["prompt_tokens"] if collector.last else None)
+
+    def test_self_check_fail_sets_render_missing(self):
+        """10. 自检不通过（没有 on_delta，或强制失败）→ hooks.render 为 missing。"""
+        collector = make_collector(FakeClock())
+
+        class NoOnDeltaApp:
+            def chat(self, messages):
+                return {}
+
+        hooks = {"chat": "pending", "render": "pending"}
+        self.assertFalse(tfpanel.run_self_check(fake_module(NoOnDeltaApp),
+                                                collector, hooks))
+        self.assertEqual(hooks["render"], "missing")
+        self.assertEqual(hooks["chat"], "missing")
+
+        hooks2 = {"chat": "pending", "render": "pending"}
+        app_cls = make_render_app_cls(render_len=9, reply={"ok": 1})
+        self.assertFalse(tfpanel.run_self_check(fake_module(app_cls),
+                                                collector, hooks2,
+                                                force_fail=True))
+        self.assertEqual(hooks2["render"], "missing")
+
+    def test_snapshot_current_has_prompt_tokens_key(self):
+        """11. 预填充时 current 含 prompt_tokens 键，没调用过 render 时为 None。"""
+        clock = FakeClock()
+        collector = make_collector(clock)
+        req = collector.begin()
+        cur = collector.snapshot()["current"]
+        self.assertIn("prompt_tokens", cur)
+        self.assertIsNone(cur["prompt_tokens"])
+        collector.set_prompt_tokens(req, 42)
+        self.assertEqual(collector.snapshot()["current"]["prompt_tokens"], 42)
+        # 解码时也有该键
+        clock.advance(0.5)
+        collector.delta(req, "x")
+        self.assertEqual(collector.snapshot()["current"]["prompt_tokens"], 42)
+        # 一个请求只记第一次
+        collector.set_prompt_tokens(req, 7)
+        self.assertEqual(collector.snapshot()["current"]["prompt_tokens"], 42)
+
+    def test_metrics_current_contains_prompt_tokens(self):
+        """12. HTTP：current 不为空时含 prompt_tokens 键，值来自 render。"""
+        clock = FakeClock(1000.0)
+        collector = make_collector(clock)
+        collector.tensorfold_version = "0.3.4"
+        hooks = {"chat": "missing", "render": "missing"}
+        collector.hooks = hooks  # 和 main() 一样，snapshot 输出的是 collector.hooks
+
+        release = threading.Event()
+
+        class App(FakeChatApp):
+            served_name = "fake-model"
+            context_window = 262144
+
+            def render(self, messages, tools=None, thinking=None):
+                return list(range(987)), 0
+
+            def chat(self, messages, *, on_delta=None):
+                self.render(messages)
+                release.wait(timeout=5)
+                return {"ok": 1}
+
+        self.assertTrue(tfpanel.patch_chat_app(fake_module(App), collector, hooks))
+        app = App()
+        server = tfpanel.make_metrics_server(0, collector)
+        port = server.server_address[1]
+        done = threading.Event()
+
+        def run_chat():
+            app.chat([{"role": "user", "content": "hi"}])
+            done.set()
+
+        t = threading.Thread(target=run_chat)
+        t.start()
+        try:
+            # 轮询直到 /metrics 看到进行中的请求（HTTP 测试允许短 sleep）
+            data = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/metrics", timeout=5) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if data["current"] is not None:
+                    break
+                time.sleep(0.01)
+            release.set()
+            t.join(timeout=5)
+            self.assertTrue(done.is_set())
+            self.assertIsNotNone(data)
+            self.assertIsNotNone(data["current"])
+            self.assertIn("prompt_tokens", data["current"])
+            self.assertEqual(data["current"]["prompt_tokens"], 987)
+            self.assertIn("render", data["hooks"])
+            self.assertEqual(data["hooks"]["render"], "ok")
+        finally:
+            release.set()
+            t.join(timeout=5)
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

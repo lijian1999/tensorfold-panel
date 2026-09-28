@@ -208,7 +208,7 @@ struct DialView: View {
     }
 }
 
-/// 仪表中心文字：cap + 药丸 / 大数字 / 单位 / 小曲线；message 非空时只显示消息
+/// 仪表中心文字：标题行 + 药丸 / 大数字 / 上下文条；message 非空时只显示消息
 struct CenterView: View {
     let model: PanelViewModel
     let frame: PanelAnimator.Frame
@@ -230,16 +230,15 @@ struct CenterView: View {
             } else {
                 capRow
                 bigRow
-                unitRow
-                if model.showSpark { sparkView }
+                if let ctx = model.context { ctxBar(ctx) }
             }
         }
     }
 
-    /// cap 行（y=78，高 20）：cap 13 号 muted +「精确」药丸（间距 6）
+    /// 标题行（y=78，高 20）：capText（标题 · 单位）13 号 muted +「精确」药丸（间距 6）
     private var capRow: some View {
         HStack(spacing: 6 * s) {
-            Text(model.cap)
+            Text(model.capText)
                 .font(.system(size: 13 * s))
                 .foregroundColor(Theme.muted)
             if model.pill {
@@ -290,45 +289,39 @@ struct CenterView: View {
         .position(x: 154 * s, y: (97 + 48 - 3) * s)
     }
 
-    /// 单位（y=194）：15 号 semibold muted
-    private var unitRow: some View {
-        Text(model.unit)
-            .font(.system(size: 15 * s, weight: .semibold).monospacedDigit())
-            .foregroundColor(Theme.muted)
-            .frame(width: 220 * s, height: 18 * s)
-            .position(x: 154 * s, y: (194 + 9) * s)
-    }
-
-    /// 小曲线（x=94, y=216，120×26）：淡线 raw + 实线 smooth
-    private var sparkView: some View {
-        let samples = model.spark
-        let n = samples.count
+    /// 上下文条（与原型 .ctx 一致）：长条 x=94、y=205、120×6、圆角 3；
+    /// 下方 5 处一行文字（y=216，行高 14，220 宽居中，12 号）；
+    /// 填充颜色：normal → text2，warn → amber，full → danger
+    private func ctxBar(_ ctx: ContextUsage) -> some View {
+        let fillColor: Color
+        switch ctx.level {
+        case .normal: fillColor = Theme.text2
+        case .warn: fillColor = Theme.amber
+        case .full: fillColor = Theme.danger
+        }
+        var text = AttributedString()
+        for seg in ctx.segments {
+            var piece = AttributedString(seg.text)
+            piece.font = .system(size: 12 * s, weight: seg.bold ? .semibold : .regular).monospacedDigit()
+            piece.foregroundColor = seg.bold ? Theme.text2 : Theme.muted
+            text += piece
+        }
         return ZStack {
-            sparkPath(samples.map { $0.raw })
-                .stroke(Theme.faint,
-                        style: StrokeStyle(lineWidth: 1 * s, lineCap: .round, lineJoin: .round))
-            sparkPath(samples.map { $0.smooth })
-                .stroke(Theme.accent,
-                        style: StrokeStyle(lineWidth: CGFloat(1.75) * s, lineCap: .round, lineJoin: .round))
+            // 长条：底色 + 从左开始的填充（宽 = fillWidth；0 时不画填充）
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3 * s).fill(Theme.track)
+                if ctx.fillWidth > 0 {
+                    RoundedRectangle(cornerRadius: 3 * s)
+                        .fill(fillColor)
+                        .frame(width: ctx.fillWidth * s)
+                }
+            }
+            .frame(width: 120 * s, height: 6 * s)
+            .position(x: (94 + 60) * s, y: (205 + 3) * s)
+            Text(text)
+                .frame(width: 220 * s, height: 14 * s)
+                .position(x: 154 * s, y: (216 + 7) * s)
         }
-        .frame(width: 120 * s, height: 26 * s)
-        .position(x: (94 + 60) * s, y: (216 + 13) * s)
-        .opacity(n > 0 ? 1 : 0)
-    }
-
-    /// 与仪表同一非线性刻度；x = 120 − (n−1−i)·(120/79)，y = 26 − 1.5 − f·23
-    private func sparkPath(_ values: [Double]) -> Path {
-        var p = Path()
-        let n = values.count
-        guard n > 0 else { return p }
-        for (i, v) in values.enumerated() {
-            let f = Gauge.valueToFraction(v)
-            let x = 120 - (Double(n - 1 - i)) * (120 / 79)
-            let y = 26 - 1.5 - f * 23
-            let pt = CGPoint(x: CGFloat(x) * s, y: CGFloat(y) * s)
-            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
-        }
-        return p
     }
 }
 

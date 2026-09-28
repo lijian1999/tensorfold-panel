@@ -31,6 +31,8 @@ public struct Metrics: Decodable, Sendable {
         public var decodeTps: Double?
         public var decodeTpsPeak: Double?
         public var decodeTpsAvg: Double?
+        /// 本次提示 token 数（精确，拿不到时为 nil）
+        public var promptTokens: Int?
 
         public init(
             elapsedS: Double? = nil,
@@ -38,7 +40,8 @@ public struct Metrics: Decodable, Sendable {
             outputTokens: Int? = nil,
             decodeTps: Double? = nil,
             decodeTpsPeak: Double? = nil,
-            decodeTpsAvg: Double? = nil
+            decodeTpsAvg: Double? = nil,
+            promptTokens: Int? = nil
         ) {
             self.elapsedS = elapsedS
             self.ttftS = ttftS
@@ -46,6 +49,7 @@ public struct Metrics: Decodable, Sendable {
             self.decodeTps = decodeTps
             self.decodeTpsPeak = decodeTpsPeak
             self.decodeTpsAvg = decodeTpsAvg
+            self.promptTokens = promptTokens
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -55,6 +59,7 @@ public struct Metrics: Decodable, Sendable {
             case decodeTps = "decode_tps"
             case decodeTpsPeak = "decode_tps_peak"
             case decodeTpsAvg = "decode_tps_avg"
+            case promptTokens = "prompt_tokens"
         }
     }
 

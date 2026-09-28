@@ -35,15 +35,6 @@ enum Snapshot {
             )
             tracker.recordSuccess(m, at: 100)
         }
-        // decode / done：注入 80 个确定性小曲线样本，保证截图可复现
-        if let state = tracker.lastSuccess?.state, state == "decode" || state == "done" {
-            tracker.sparkSamples = (0..<80).map { i in
-                let d = Double(i)
-                let smooth = 58 + 8 * sin(d / 9)
-                let raw = smooth + 30 * sin(d * 1.7) * (0.5 + 0.5 * sin(d / 5))
-                return SparkSample(raw: raw, smooth: smooth)
-            }
-        }
         return tracker
     }
 

@@ -11,7 +11,8 @@
     "output_tokens": 312,
     "decode_tps": 58.4,
     "decode_tps_peak": 71.2,
-    "decode_tps_avg": 57.9
+    "decode_tps_avg": 57.9,
+    "prompt_tokens": 18420
   },
   "last": {
     "prompt_tokens": 22,

@@ -10,7 +10,8 @@
     "ttft_s": null,
     "output_tokens": null,
     "decode_tps": null,
-    "decode_tps_peak": null
+    "decode_tps_peak": null,
+    "prompt_tokens": 18420
   },
   "last": {
     "prompt_tokens": 22,
