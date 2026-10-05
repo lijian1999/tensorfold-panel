@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "state": "done",
+  "hook": "ok",
+  "model": "Qwen3.8-Flash-Next",
+  "context_max": 262144,
+  "lanes": {
+    "max": 5,
+    "decoding": 0,
+    "prefilling": 0,
+    "waiting": 0
+  },
+  "decode": null,
+  "prefill": null,
+  "context_used": 696,
+  "last": {
+    "prompt_tokens": 96,
+    "cached_tokens": 0,
+    "completion_tokens": 600,
+    "decode_tps": 97.2,
+    "prefill_tps": 1100.0,
+    "ttft_s": 0.09,
+    "acceptance_rate": 0.81,
+    "context_used": 696
+  },
+  "round": {
+    "requests": 1,
+    "running": 0,
+    "output_tokens": 600,
+    "decode_tps_avg": 97.2,
+    "exact": true,
+    "elapsed_s": 6.3,
+    "active": true
+  },
+  "today": {
+    "date": "2026-10-03",
+    "prompt_tokens": 8260391,
+    "cached_tokens": 5443627,
+    "completion_tokens": 185305,
+    "requests": 98,
+    "cost": 0.597
+  },
+  "memory": {
+    "used_gb": 94.2,
+    "total_gb": 121.6
+  },
+  "offline_s": null
+}

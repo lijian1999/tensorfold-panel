@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "state": "decode",
+  "hook": "ok",
+  "model": "Qwen3.8-Flash-Next",
+  "context_max": 262144,
+  "lanes": {
+    "max": 5,
+    "decoding": 3,
+    "prefilling": 1,
+    "waiting": 0
+  },
+  "decode": {
+    "tps": 100.2,
+    "tps_peak": 118.4,
+    "tps_avg": 104.9,
+    "output_tokens": 742,
+    "ttft_s": null
+  },
+  "prefill": {
+    "elapsed_s": 2.8,
+    "prompt_tokens": 61000,
+    "cached_tokens": 2048,
+    "filled_tokens": 8192,
+    "tps": 1650.0,
+    "remaining_s": 32.0,
+    "est_s": 25.6,
+    "cache_miss": false
+  },
+  "context_used": 61000,
+  "last": {
+    "prompt_tokens": 58,
+    "cached_tokens": 0,
+    "completion_tokens": 570,
+    "decode_tps": 63.6,
+    "prefill_tps": 704.0,
+    "ttft_s": 0.07,
+    "acceptance_rate": 0.7,
+    "context_used": 628
+  },
+  "round": {
+    "requests": 3,
+    "running": 4,
+    "output_tokens": 1702,
+    "decode_tps_avg": 107.6,
+    "exact": false,
+    "elapsed_s": 46.3,
+    "active": true
+  },
+  "today": {
+    "date": "2026-10-03",
+    "prompt_tokens": 8260391,
+    "cached_tokens": 5443627,
+    "completion_tokens": 185305,
+    "requests": 98,
+    "cost": 0.597
+  },
+  "memory": {
+    "used_gb": 94.9,
+    "total_gb": 121.6
+  },
+  "offline_s": null
+}
