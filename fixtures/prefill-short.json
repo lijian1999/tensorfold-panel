@@ -2,6 +2,7 @@
   "version": 2,
   "state": "prefill",
   "hook": "ok",
+  "engine": "tensorfold",
   "model": "Qwen3.8-Flash-Next",
   "context_max": 262144,
   "lanes": {
@@ -19,7 +20,8 @@
     "tps": null,
     "remaining_s": 0.0,
     "est_s": 0.44,
-    "cache_miss": false
+    "cache_miss": false,
+    "estimated": false
   },
   "context_used": 9200,
   "last": {

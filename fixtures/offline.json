@@ -2,6 +2,7 @@
   "version": 2,
   "state": "offline",
   "hook": "ok",
+  "engine": "tensorfold",
   "model": "Qwen3.8-Flash-Next",
   "context_max": 262144,
   "lanes": {

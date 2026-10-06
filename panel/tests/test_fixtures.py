@@ -7,16 +7,17 @@ from pathlib import Path
 # 测试文件在 panel/tests/ 下，往上两级就是仓库根目录，fixtures/ 在它下面。
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
-# 基础快照的顶层 14 个键。
+# 基础快照的顶层 15 个键。
 TOP_KEYS = {
-    "version", "state", "hook", "model", "context_max", "lanes", "decode",
-    "prefill", "context_used", "last", "round", "today", "memory", "offline_s",
+    "version", "state", "hook", "engine", "model", "context_max",
+    "lanes", "decode", "prefill", "context_used", "last", "round", "today",
+    "memory", "offline_s",
 }
 
 DECODER_OBJ_KEYS = {"tps", "tps_peak", "tps_avg", "output_tokens", "ttft_s"}
 PREFILL_OBJ_KEYS = {
     "elapsed_s", "prompt_tokens", "cached_tokens", "filled_tokens",
-    "tps", "remaining_s", "est_s", "cache_miss",
+    "tps", "remaining_s", "est_s", "cache_miss", "estimated",
 }
 ROUND_OBJ_KEYS = {
     "requests", "running", "output_tokens", "decode_tps_avg", "exact",
@@ -39,8 +40,11 @@ HOOKS = {"ok", "missing"}
 PREFILL_HOOK_NULL_KEYS = {"cached_tokens", "filled_tokens", "tps",
                           "remaining_s", "est_s"}
 
-# 应有的 14 个样例文件名。
+# 应有的 17 个样例文件名。
 FIXTURE_NAMES = {
+    "prefill-est.json",
+    "idle-vllm.json",
+    "offline-vllm.json",
     "offline.json",
     "idle.json",
     "idle-nohook.json",
@@ -79,7 +83,7 @@ def each_fixture(test_case):
 
 class TestFixtureFiles(unittest.TestCase):
     def test_fixture_files_exist(self):
-        """fixtures/ 里恰好有 14 个样例文件，不多不少。"""
+        """fixtures/ 里恰好有 17 个样例文件，不多不少。"""
         self.assertTrue(FIXTURES_DIR.is_dir(),
                         f"缺少目录 {FIXTURES_DIR}")
         found = {p.name for p in FIXTURES_DIR.glob("*.json")}
@@ -94,7 +98,7 @@ class TestFixtureFormat(unittest.TestCase):
             self.assertIsInstance(snap, dict)
 
     def test_top_level_keys(self):
-        """顶层键恰好是基础快照的 14 个键。"""
+        """顶层键恰好是基础快照的 15 个键。"""
         for path in each_fixture(self):
             snap = load(path)
             self.assertEqual(set(snap.keys()), TOP_KEYS)
@@ -106,6 +110,20 @@ class TestFixtureFormat(unittest.TestCase):
             self.assertEqual(snap["version"], 2)
             self.assertIn(snap["state"], STATES)
             self.assertIn(snap["hook"], HOOKS)
+
+    def test_engine(self):
+        """engine 只能是 tensorfold 或 vllm。"""
+        for path in each_fixture(self):
+            self.assertIn(load(path)["engine"], {"tensorfold", "vllm"})
+
+    def test_estimated(self):
+        """有预填充时 estimated 是布尔；TensorFold 的样例必须是 False。"""
+        for path in each_fixture(self):
+            snap = load(path)
+            if snap["prefill"] is not None:
+                self.assertIsInstance(snap["prefill"]["estimated"], bool)
+                if snap["engine"] == "tensorfold":
+                    self.assertFalse(snap["prefill"]["estimated"])
 
     def test_lanes(self):
         """lanes 恰好 4 个整数键。"""

@@ -1,12 +1,12 @@
 {
   "version": 2,
   "state": "idle",
-  "hook": "missing",
-  "engine": "tensorfold",
-  "model": "Qwen3.8-Flash-Next",
+  "hook": "ok",
+  "engine": "vllm",
+  "model": "Qwen/Qwen3.8-Flash-Next",
   "context_max": 262144,
   "lanes": {
-    "max": 5,
+    "max": 4,
     "decoding": 0,
     "prefilling": 0,
     "waiting": 0
