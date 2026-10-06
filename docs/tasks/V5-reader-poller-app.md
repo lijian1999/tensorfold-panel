@@ -28,7 +28,7 @@ python3 -m unittest panel.tests.test_sources 2>&1 | tail -1
 
 ## 第二步：`EngineReader`（`panel/engine.py`）
 
-`panel/engine.py` 开头加 `from panel.sources import Fetcher, parse_health, parse_vllm_metrics`，在 `VllmAdapter` 后面加 `EngineReader`：
+`panel/engine.py`：文件开头那两行 `#` 注释改成模块文档字符串（和 `panel/` 下别的文件一样），内容改成“引擎适配：引擎识别（`EngineReader`）和 vLLM 适配器（`VllmAdapter`）……”这样两样都提到；`_DEFAULT_TPS` 那行注释里的英文词 `assumed` 改成中文。然后加 `from panel.sources import Fetcher, parse_health, parse_vllm_metrics`，在 `VllmAdapter` 后面加 `EngineReader`：
 
 ```python
 class EngineReader:
