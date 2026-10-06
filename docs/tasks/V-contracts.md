@@ -117,7 +117,7 @@ class VllmAdapter:
     def rows(self) -> list[dict]                     # 当前流表各行的拷贝（每行恰好第 3 节那 7 个键），按到达先后
 
 class EngineReader:
-    def __init__(self, base_urls: list[str], make_fetcher=Fetcher, timeout_s: float = 0.5) -> None
+    def __init__(self, base_urls: list[str], make_fetcher=None, timeout_s: float = 0.5) -> None
     engine: str | None            # 属性："tensorfold"、"vllm"，没认出时 None
     base_url: str | None          # 属性：认出的那个地址，没认出时 None
     metrics_every_tick: bool      # 属性：engine == "vllm"
@@ -129,7 +129,8 @@ class EngineReader:
 ```
 
 - `VllmAdapter` 不读时钟、不做 I/O，同样的输入序列得到同样的输出。
-- `EngineReader` 对轮询来说就是一个 `Fetcher`（`health`、`metrics`、`model_name`、`close` 四个方法的含义相同），多了引擎识别。`make_fetcher(base_url)` 返回一个有 `get_text`、`health`、`metrics`、`model_name`、`model_info`、`close` 的对象。
+- `EngineReader` 对轮询来说就是一个 `Fetcher`（`health`、`metrics`、`model_name`、`close` 四个方法的含义相同），多了引擎识别。`make_fetcher(base_url)` 返回一个有 `get_text`、`health`、`metrics`、`model_name`、`model_info`、`close` 的对象；不给时用 `Fetcher(base_url, timeout_s=timeout_s)`。
+- 轮询每一拍先调 `prepare`，再调 `health`；`metrics_every_tick` 为真时每一拍都调 `metrics`（vLLM 的 `metrics` 不访问网络，返回读 `health` 时顺带得到的那份）。
 
 ## 5. 采集（`panel/collector.py`）
 
