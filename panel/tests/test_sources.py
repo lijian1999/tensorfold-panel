@@ -222,6 +222,17 @@ class TestParseVllmMetrics(unittest.TestCase):
         self.assertIsNone(parse_vllm_metrics("tensorfold:requests_waiting 0\n"))
         self.assertIsNone(parse_vllm_metrics(METRICS_TEXT))
 
+    def test_non_finite_values(self):
+        """数值是 NaN、+Inf、-Inf 时按读不懂的行忽略，不抛异常。"""
+        got = parse_vllm_metrics("vllm:num_requests_running 1\n"
+                                 "vllm:generation_tokens_total NaN\n"
+                                 "vllm:prompt_tokens_total +Inf\n")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["running"], 1)
+        self.assertEqual(got["generation"], 0)
+        self.assertEqual(got["prompt"], 0)
+        self.assertIsNone(parse_vllm_metrics("vllm:num_requests_running NaN\n"))
+
 
 class TestParseMeminfo(unittest.TestCase):
     TEXT = "MemTotal:       127532380 kB\nMemFree: 1 kB\nMemAvailable:   30168172 kB\n"

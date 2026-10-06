@@ -342,3 +342,361 @@ class TestEdges(SeqCase):
         self.assertEqual(health["requests_total"], 0)
         self.assertIsNone(health["epoch"])
 
+
+
+from panel.collector import Collector
+from panel.config import Config
+from panel.engine import EngineReader
+
+METRIC_NAMES = {
+    "running": "vllm:num_requests_running", "waiting": "vllm:num_requests_waiting",
+    "queries": "vllm:prefix_cache_queries_total", "hits": "vllm:prefix_cache_hits_total",
+    "prompt": "vllm:prompt_tokens_total", "prompt_cached": "vllm:prompt_tokens_cached_total",
+    "ttft_sum": "vllm:time_to_first_token_seconds_sum", "ttft_count": "vllm:time_to_first_token_seconds_count",
+    "generation": "vllm:generation_tokens_total", "success": "vllm:request_success_total",
+    "req_prompt_sum": "vllm:request_prompt_tokens_sum", "req_generation_sum": "vllm:request_generation_tokens_sum",
+    "req_computed_sum": "vllm:request_prefill_kv_computed_tokens_sum",
+    "prefill_s": "vllm:request_prefill_time_seconds_sum", "decode_s": "vllm:request_decode_time_seconds_sum",
+    "drafted": "vllm:spec_decode_num_draft_tokens_total", "accepted": "vllm:spec_decode_num_accepted_tokens_total",
+    "epoch": "process_start_time_seconds",
+}
+
+
+def metrics_text(m):
+    """把一份 vLLM 读数写回 /metrics 文本（repr 保证浮点数原样读回来）。"""
+    return "".join(f"{METRIC_NAMES[k]} {m[k]!r}\n" for k in METRIC_NAMES if m.get(k) is not None)
+
+
+class FakeFetcher:
+    """假读取器：texts 是 {路径: 正文或 None}；记下每次调用。"""
+
+    def __init__(self, url, texts=None, health=None, metrics=None, model=None, info=None):
+        self.url = url
+        self.texts = dict(texts or {})
+        self.health_value, self.metrics_value, self.model_value, self.info_value = health, metrics, model, info
+        self.calls = []
+        self.closed = 0
+
+    def get_text(self, path):
+        self.calls.append(("get_text", path))
+        return self.texts.get(path)
+
+    def health(self):
+        self.calls.append(("health",))
+        return self.health_value
+
+    def metrics(self):
+        self.calls.append(("metrics",))
+        return self.metrics_value
+
+    def model_name(self):
+        self.calls.append(("model_name",))
+        return self.model_value
+
+    def model_info(self):
+        self.calls.append(("model_info",))
+        return self.info_value
+
+    def close(self):
+        self.closed += 1
+
+
+def reader_with(fakes):
+    """fakes 是 {地址: FakeFetcher}；返回按这些地址的顺序去试的 EngineReader。"""
+    return EngineReader(list(fakes), make_fetcher=lambda url: fakes[url])
+
+
+# 一份真实的 /metrics 原文：B 地址靠它被认成 vLLM
+VTEXT = (SEQ_DIR / "metrics-b.txt").read_text(encoding="utf-8")
+A = "http://127.0.0.1:8888"
+B = "http://127.0.0.1:8000"
+TF = '{"ok": true, "backend": "tensorfold", "requests_running": 0}'
+
+
+class TestEngineReader(unittest.TestCase):
+    """EngineReader：认出引擎、只读认出的那个地址、连续 3 次读不到就忘掉。"""
+
+    def vreader(self):
+        """A 读不到、B 是 vLLM 的 reader 和 B 的假读取器。"""
+        fb = FakeFetcher(B, {"/health": "", "/metrics": VTEXT})
+        return reader_with({A: FakeFetcher(A), B: fb}), fb
+
+    def test_all_unreachable(self):
+        fa, fb = FakeFetcher(A), FakeFetcher(B)
+        reader = reader_with({A: fa, B: fb})
+        self.assertIsNone(reader.health())
+        self.assertIsNone(reader.engine)
+        self.assertIsNone(reader.base_url)
+        self.assertIs(reader.metrics_every_tick, False)
+        self.assertIsNone(reader.metrics())
+        self.assertIsNone(reader.model_name())
+        for _ in range(4):
+            self.assertIsNone(reader.health())
+        self.assertEqual(fa.calls.count(("get_text", "/health")), 5)
+        self.assertEqual(fb.calls.count(("get_text", "/health")), 5)
+        self.assertEqual((fa.closed, fb.closed), (0, 0))
+
+    def test_recognizes_tensorfold(self):
+        fa = FakeFetcher(A, {"/health": TF}, health={"ok": True, "requests_running": 1},
+                         metrics={"waiting": 3}, model="m")
+        fb = FakeFetcher(B)
+        reader = reader_with({A: fa, B: fb})
+        self.assertEqual(reader.health(), {"ok": True, "backend": "tensorfold", "requests_running": 0})
+        self.assertEqual(reader.engine, "tensorfold")
+        self.assertEqual(reader.base_url, A)
+        self.assertIs(reader.metrics_every_tick, False)
+        self.assertEqual(fb.calls, [])
+        self.assertEqual(reader.health(), {"ok": True, "requests_running": 1})  # 走 A.health()
+        self.assertEqual(reader.metrics(), {"waiting": 3})
+        self.assertEqual(reader.model_name(), "m")
+
+    def test_recognizes_vllm_on_second_url(self):
+        reader, fb = self.vreader()
+        reader.prepare(5.0, None)
+        health = reader.health()
+        self.assertEqual(health["backend"], "vllm")
+        self.assertEqual(health["requests_total"], 20)
+        self.assertEqual(health["completion_tokens_total"], 2036)
+        self.assertIn("tfpanel", health)
+        self.assertEqual(reader.engine, "vllm")
+        self.assertEqual(reader.base_url, B)
+        self.assertIs(reader.metrics_every_tick, True)
+        got = reader.metrics()
+        self.assertEqual(got, {"waiting": 0, "kv_usage": [], "ttft_sum": 0.0, "ttft_count": 0})
+        got["waiting"] = 99
+        self.assertEqual(reader.metrics()["waiting"], 0)  # 返回的是拷贝
+        # 再读一次：B 只多一次 /metrics，A 没有新的调用
+        before = len(fb.calls)
+        fa = reader._fetchers[A]
+        seen = len(fa.calls)
+        reader.health()
+        self.assertEqual(fb.calls[before:], [("get_text", "/metrics")])
+        self.assertEqual(len(fa.calls), seen)
+
+    def test_health_200_but_unrecognized(self):
+        # 两个地址都认不出：None
+        reader = reader_with({A: FakeFetcher(A, {"/health": "", "/metrics": "tensorfold:requests_waiting 0\n"}),
+                              B: FakeFetcher(B)})
+        self.assertIsNone(reader.health())
+        self.assertIsNone(reader.engine)
+        # /health 不是合法的 TensorFold 正文时照样去看 /metrics
+        reader = reader_with({A: FakeFetcher(A, {"/health": '{"ok": false}', "/metrics": VTEXT})})
+        self.assertEqual(reader.health()["backend"], "vllm")
+        self.assertEqual(reader.engine, "vllm")
+
+    def test_forget_after_three_misses(self):
+        reader, fb = self.vreader()
+        reader.prepare(5.0, None)
+        self.assertEqual(reader.health()["backend"], "vllm")
+        fa = reader._fetchers[A]
+        seen = fa.calls.count(("get_text", "/health"))
+        fb.texts["/metrics"] = None
+        self.assertIsNone(reader.health())
+        self.assertEqual(reader.engine, "vllm")
+        self.assertIsNone(reader.health())
+        self.assertEqual(reader.engine, "vllm")
+        self.assertIsNone(reader.health())
+        self.assertIsNone(reader.engine)
+        self.assertIsNone(reader.base_url)
+        self.assertGreaterEqual(fb.closed, 1)
+        self.assertIsNone(reader.health())  # 忘掉之后又从 A 开始试
+        self.assertEqual(fa.calls.count(("get_text", "/health")), seen + 1)
+
+    def test_one_read_resets_the_counter(self):
+        reader, fb = self.vreader()
+        reader.prepare(5.0, None)
+        self.assertEqual(reader.health()["backend"], "vllm")
+        for _ in range(2):  # 读不到两次
+            fb.texts["/metrics"] = None
+            self.assertIsNone(reader.health())
+        fb.texts["/metrics"] = VTEXT
+        self.assertIsNotNone(reader.health())  # 读到一次，计数清零
+        fb.texts["/metrics"] = None
+        self.assertIsNone(reader.health())
+        self.assertIsNone(reader.health())
+        self.assertEqual(reader.engine, "vllm")
+
+    def test_forget_tensorfold(self):
+        fa = FakeFetcher(A, {"/health": TF}, health={"ok": True, "requests_running": 1})
+        reader = reader_with({A: fa, B: FakeFetcher(B)})
+        self.assertEqual(reader.health()["backend"], "tensorfold")
+        fa.health_value = None
+        for _ in range(3):
+            self.assertIsNone(reader.health())
+        self.assertIsNone(reader.engine)
+
+    def test_adapter_clean_after_forget(self):
+        data, samples = load("abort-decode")
+        reader, fb = self.vreader()
+        last = None
+        for t, m in samples[::2]:
+            fb.texts["/metrics"] = metrics_text(m)
+            reader.prepare(t, None)
+            last = reader.health()
+        self.assertEqual(last["aborted_total"], 1)
+        fb.texts["/metrics"] = None
+        for _ in range(3):
+            self.assertIsNone(reader.health())
+        self.assertIsNone(reader.engine)
+        fb.texts["/metrics"] = metrics_text(samples[::2][-1][1])
+        self.assertEqual(reader.health()["aborted_total"], 0)
+
+    def test_now_and_tps_go_to_adapter(self):
+        data, samples = load("long")
+        reader, fb = self.vreader()
+        start = None
+        for t, m in samples[::2]:
+            fb.texts["/metrics"] = metrics_text(m)
+            reader.prepare(t, 24085.0)
+            health = reader.health()
+            if start is None and t >= 3.5058 and health and health.get("tfpanel"):
+                streams = health["tfpanel"]["streams"]
+                if streams:
+                    start = streams[0]["start"]
+        self.assertIsNotNone(start)
+        self.assertAlmostEqual(start, 2.5058, delta=0.002)
+        self.assertEqual(reader.metrics()["ttft_count"], 1)
+        self.assertAlmostEqual(reader.metrics()["ttft_sum"], 9.3375, delta=0.001)
+
+    def test_vllm_model_name_and_context(self):
+        reader, fb = self.vreader()
+        reader.prepare(5.0, None)
+        self.assertNotIn("context_length", reader.health())
+        fb.info_value = {"id": "Qwen/Qwen3.8-Flash-Next", "max_model_len": 131072}
+        self.assertEqual(reader.model_name(), "Qwen/Qwen3.8-Flash-Next")
+        self.assertEqual(reader.health()["context_length"], 131072)
+        fb.info_value = None
+        self.assertIsNone(reader.model_name())
+
+    def test_close_closes_every_fetcher(self):
+        fa = FakeFetcher(A)
+        reader = reader_with({A: fa, B: FakeFetcher(B, {"/health": "", "/metrics": VTEXT})})
+        reader.prepare(5.0, None)
+        self.assertEqual(reader.health()["backend"], "vllm")
+        reader.close()
+        self.assertGreaterEqual(fa.closed, 1)
+        self.assertGreaterEqual(reader._fetchers[B].closed, 1)
+
+    def test_default_fetcher_unreachable(self):
+        """不传 make_fetcher 时用的是真的 Fetcher：读不到也不抛异常。"""
+        self.assertIsNone(EngineReader(["http://127.0.0.1:1"]).health())
+
+
+def run_pipeline(name, usage=None):
+    """适配器和采集器连着跑一段序列：返回 [(时刻, 读数, 快照), …]。"""
+    data, samples = load(name)
+    adapter = VllmAdapter()
+    collector = Collector(Config(), usage)
+    out = []
+    for t, m in samples[::2]:
+        health, metrics = adapter.feed(t, m, collector.prefill_tps, 262144)
+        out.append((t, m, collector.feed(t, health, metrics)))
+    return out
+
+
+class RecordingLedger:
+    """只记 update 参数的假账本。"""
+
+    def __init__(self):
+        self.updates = []
+
+    def today(self):
+        return {}
+
+    def update(self, totals):
+        self.updates.append(dict(totals))
+
+
+class TestPipeline(unittest.TestCase):
+    """适配器和采集器连起来，对照录制时实际发出的请求。"""
+
+    def first_state(self, runs, state):
+        """第一份某种状态的快照，没有就 None。"""
+        return next((s for _t, _m, s in runs if s["state"] == state), None)
+
+    def test_short(self):
+        runs = run_pipeline("short")
+        req = load("short")[0]["requests"][0]
+        snap = runs[-1][2]
+        self.assertEqual(snap["state"], "done")
+        self.assertEqual(snap["engine"], "vllm")
+        self.assertEqual(snap["hook"], "ok")
+        last = snap["last"]
+        self.assertEqual(last["prompt_tokens"], req["prompt_tokens"])
+        self.assertEqual(last["completion_tokens"], req["completion_tokens"])
+        self.assertEqual(last["cached_tokens"], 0)
+        self.assertAlmostEqual(last["ttft_s"], 0.1255, delta=0.001)
+        self.assertAlmostEqual(last["decode_tps"], 40 / 0.61455, delta=0.01)
+
+    def test_long(self):
+        runs = run_pipeline("long")
+        first_pf = self.first_state(runs, "prefill")
+        self.assertIs(first_pf["prefill"]["estimated"], True)
+        self.assertEqual(first_pf["prefill"]["prompt_tokens"], 24085)
+        self.assertEqual(first_pf["prefill"]["cached_tokens"], 0)
+        self.assertAlmostEqual(first_pf["prefill"]["elapsed_s"], 2.0, delta=0.01)
+        last_pf = next(s for _t, _m, s in reversed(runs) if s["state"] == "prefill")
+        self.assertGreaterEqual(last_pf["prefill"]["filled_tokens"] / last_pf["prefill"]["prompt_tokens"], 0.6)
+        for _t, _m, snap in runs:
+            if snap["state"] == "decode":
+                self.assertAlmostEqual(snap["decode"]["ttft_s"], 9.3375, delta=0.001)
+        snap = runs[-1][2]
+        self.assertEqual(snap["state"], "done")
+        last = snap["last"]
+        self.assertEqual(last["prompt_tokens"], 24085)
+        self.assertEqual(last["cached_tokens"], 0)
+        self.assertEqual(last["completion_tokens"], 160)
+        self.assertAlmostEqual(last["ttft_s"], 9.3375, delta=0.001)
+        self.assertEqual(last["context_used"], 24245)
+
+    def test_followup(self):
+        for t, _m, snap in run_pipeline("followup"):
+            if snap["prefill"] is not None:
+                self.assertFalse(snap["prefill"].get("cache_miss"), f"t={t}")
+        last = run_pipeline("followup")[-1][2]["last"]
+        self.assertEqual(last["prompt_tokens"], 24126)
+        self.assertEqual(last["cached_tokens"], 19584)
+        self.assertEqual(last["completion_tokens"], 120)
+
+    def test_aborts(self):
+        for name in ("abort-decode", "abort-prefill"):
+            runs = run_pipeline(name)
+            states = [s["state"] for _t, _m, s in runs]
+            self.assertNotIn("done", states, name)
+            snap = runs[-1][2]
+            self.assertEqual(snap["state"], "idle", name)
+            self.assertIsNone(snap["last"], name)
+            self.assertEqual(snap["lanes"]["decoding"], 0, name)
+            self.assertEqual(snap["lanes"]["prefilling"], 0, name)
+
+    def test_conc5(self):
+        runs = run_pipeline("conc5")
+        for t, m, snap in runs:
+            lanes = snap["lanes"]
+            self.assertEqual(lanes["decoding"] + lanes["prefilling"], m["running"], f"t={t}")
+        snap = runs[-1][2]
+        self.assertEqual(snap["lanes"]["max"], 5)
+        self.assertEqual(snap["round"]["requests"], 5)
+        self.assertEqual(snap["round"]["output_tokens"], 568)
+        self.assertIs(snap["round"]["exact"], False)
+
+    def test_round(self):
+        snap = run_pipeline("round")[-1][2]
+        self.assertEqual(snap["round"]["requests"], 4)
+        self.assertEqual(snap["round"]["output_tokens"], 122)
+        self.assertIs(snap["round"]["exact"], True)
+        self.assertEqual(snap["last"]["prompt_tokens"], 1646)
+        self.assertEqual(snap["last"]["completion_tokens"], 30)
+
+    def test_ledger_totals(self):
+        ledger = RecordingLedger()
+        run_pipeline("conc3", ledger)
+        self.assertTrue(ledger.updates)
+        first, last = ledger.updates[0], ledger.updates[-1]
+        self.assertEqual(last["prompt"] - first["prompt"], 3199)
+        self.assertEqual(last["cached"] - first["cached"], 0)
+        self.assertEqual(last["completion"] - first["completion"], 490)
+        self.assertEqual(last["requests"] - first["requests"], 3)
+        epochs = {u["epoch"] for u in ledger.updates}
+        self.assertNotIn(None, epochs)
+        self.assertEqual(len(epochs), 1)

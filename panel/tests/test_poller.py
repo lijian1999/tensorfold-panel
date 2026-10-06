@@ -501,5 +501,103 @@ class TestCli(unittest.TestCase):
             self.assertTrue(line.startswith("offline"), line)
 
 
+class PrepareFetcher(ScriptedFetcher):
+    """带 prepare 的假读取器：记下每次的参数和当时读了几次 health。"""
+
+    def __init__(self, *args, raise_prepare=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prepares = []           # [(now, tps), …]
+        self.health_at_prepare = []  # 每次 prepare 时 health_calls 的值
+        self.raise_prepare = raise_prepare
+
+    def prepare(self, now, tps):
+        if self.raise_prepare:
+            raise RuntimeError("prepare 坏了")
+        self.prepares.append((now, tps))
+        self.health_at_prepare.append(self.health_calls)
+
+
+class TpsCollector(FakeCollector):
+    """带 prefill_tps 属性的假采集器（真的 Collector 有这个属性）。"""
+
+    prefill_tps = 2345.0
+
+
+class EveryFetcher(ScriptedFetcher):
+    """有 metrics_every_tick 的假读取器（EngineReader 认出 vLLM 时就是这样）。"""
+
+    metrics_every_tick = True
+
+
+class TestEngineHooks(unittest.TestCase):
+    """轮询认 EngineReader 多出来的 prepare 和 metrics_every_tick。"""
+
+    def test_prepare_args_and_order(self):
+        clock = FakeClock()
+        fetcher = PrepareFetcher(health=IDLE)
+        collector = TpsCollector({"state": "idle"})
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+
+        poller.tick()               # 0.0
+        clock.advance(0.3)
+        poller.tick()               # 0.3
+        self.assertEqual(fetcher.prepares, [(0.0, 2345.0), (0.3, 2345.0)])
+        # 每次 prepare 都在那一拍的 health 之前
+        self.assertEqual(fetcher.health_at_prepare, [0, 1])
+
+    def test_prepare_without_prefill_tps(self):
+        clock = FakeClock()
+        fetcher = PrepareFetcher(health=IDLE)
+        collector = FakeCollector({"state": "idle"})  # 没有 prefill_tps 属性
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+        poller.tick()
+        self.assertEqual(fetcher.prepares, [(0.0, None)])
+
+    def test_prepare_raises(self):
+        clock = FakeClock()
+        fetcher = PrepareFetcher(health=IDLE, raise_prepare=True)
+        collector = TpsCollector({"state": "idle"})
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+        snap, wait = poller.tick()
+        self.assertEqual(snap["state"], "idle")
+        self.assertEqual(fetcher.health_calls, 1)
+
+    def test_metrics_every_tick(self):
+        clock = FakeClock()
+        fetcher = EveryFetcher(health=IDLE)
+        collector = FakeCollector({"state": "idle"})
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+
+        for _ in range(4):          # 0.0、0.25、0.5、0.75
+            poller.tick()
+            clock.advance(0.25)
+        self.assertEqual(fetcher.metrics_calls, 4)
+        self.assertEqual(len(collector.calls), 4)
+        for _now, _health, metrics, _memory, _model in collector.calls:
+            self.assertIsNotNone(metrics)
+
+    def test_no_flag_still_skips_metrics_when_idle(self):
+        clock = FakeClock()
+        fetcher = ScriptedFetcher(health=IDLE)   # 没有 metrics_every_tick
+        collector = FakeCollector({"state": "idle"})
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+        for _ in range(4):
+            poller.tick()
+            clock.advance(0.25)
+        self.assertEqual(fetcher.metrics_calls, 0)
+
+    def test_metrics_not_read_without_health(self):
+        clock = FakeClock()
+        fetcher = EveryFetcher(health=None)
+        collector = FakeCollector({"state": "offline"})
+        poller, clock, memory = make(fetcher, collector, FakeMemory(), clock)
+        poller.tick()
+        self.assertEqual(fetcher.metrics_calls, 0)
+
+    def test_brief_line_engine(self):
+        self.assertTrue(brief_line({"state": "idle", "engine": "vllm"}).endswith(" engine=vllm"))
+        self.assertNotIn("engine=", brief_line({"state": "idle"}))
+
+
 if __name__ == "__main__":
     unittest.main()

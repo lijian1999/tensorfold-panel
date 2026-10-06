@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import re
 from urllib.parse import urlsplit
 
@@ -122,7 +123,8 @@ def parse_vllm_metrics(text: str) -> dict | None:
         if spec is None:
             continue
         value = _to_float(line.rsplit(None, 1)[-1])
-        if value is None:
+        # 读不懂的和 NaN、+Inf、-Inf 这种不是有限数的，都按读不懂的行忽略
+        if value is None or not math.isfinite(value):
             continue
         key = spec[0]
         sums[key] = sums.get(key, 0.0) + value

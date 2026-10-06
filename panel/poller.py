@@ -14,8 +14,9 @@ import time
 
 from panel.collector import Collector
 from panel.config import load_config
+from panel.engine import EngineReader
 from panel.fmt import cost_fmt, split1
-from panel.sources import Fetcher, read_meminfo
+from panel.sources import read_meminfo
 from panel.usage import UsageLedger
 
 METRICS_S = 0.5      # /metrics 最短读取间隔
@@ -84,7 +85,12 @@ def brief_line(snapshot) -> str:
         )
     else:
         today_str = "-"
-    return " ".join((state, lanes_str, tps_str, pf_str, round_str, today_str))
+    line = " ".join((state, lanes_str, tps_str, pf_str, round_str, today_str))
+    # 认出来的引擎：非空才写，方便在终端上一眼看出是哪个
+    engine = snap.get("engine")
+    if isinstance(engine, str) and engine:
+        line += f" engine={engine}"
+    return line
 
 
 def _num(value) -> int:
@@ -116,10 +122,19 @@ class Poller:
         now = self.clock()
         last = self._last_snapshot
 
+        # 带引擎识别的读取器需要这次的时刻和平均预填充速度才能算出每条流的明细
+        prepare = getattr(self.fetcher, "prepare", None)
+        if callable(prepare):
+            self._call(lambda: prepare(now, getattr(self.collector, "prefill_tps", None)))
+
         health = self._call(self.fetcher.health)
 
         metrics = None
-        if health is not None and self._need_metrics(now, last, health):
+        # vLLM 的 metrics 不访问网络，这一拍一定能拿到
+        every = getattr(self.fetcher, "metrics_every_tick", False) is True
+        if health is not None and every:
+            metrics = self._call(self.fetcher.metrics)
+        elif health is not None and self._need_metrics(now, last, health):
             if self._metrics_at is None or (now - self._metrics_at) >= METRICS_S:
                 self._metrics_at = now
                 metrics = self._call(self.fetcher.metrics)
@@ -223,7 +238,7 @@ def main(argv=None) -> int:
     import signal
     import threading
 
-    parser = argparse.ArgumentParser(prog="python3 -m panel.poller", description="读取 8888 端口的只读接口")
+    parser = argparse.ArgumentParser(prog="python3 -m panel.poller", description="读取模型接口的只读接口")
     parser.add_argument("--seconds", type=float, default=10.0, help="跑多久（秒），默认 10")
     parser.add_argument("--every", type=float, default=1.0, help="隔多久打印一行（秒），默认 1")
     parser.add_argument("--config", default=None, help="配置文件路径")
@@ -232,7 +247,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    fetcher = Fetcher(config.base_url)
+    fetcher = EngineReader(config.urls())
     # 没给目录时 usage=None：不和正在运行的副屏程序抢着写同一个账本
     usage = UsageLedger(config, state_dir=args.state_dir) if args.state_dir else None
     collector = Collector(config, usage)

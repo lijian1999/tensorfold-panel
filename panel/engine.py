@@ -1,5 +1,12 @@
-# vLLM 适配器：从全局计数器推出每条流的明细，并换算成 TensorFold 格式的统一读数。
-# 只用标准库；不读时钟、不做 I/O，同样的输入序列得到同样的输出。
+"""引擎适配：引擎识别（EngineReader）和 vLLM 适配器（VllmAdapter）。
+
+EngineReader 对轮询来说就是一个带引擎识别的 Fetcher：按地址顺序试，认出是哪个
+引擎之后就只读那个地址，换了引擎不用改配置、不用重启。
+VllmAdapter 把 vLLM 的全局计数器换算成和 TensorFold /health 同格式的统一读数。
+只用标准库；适配器不读时钟、不做 I/O，同样的输入序列得到同样的输出。
+"""
+
+from panel.sources import Fetcher, parse_health, parse_vllm_metrics
 
 # 用来判断“引擎换过（重启）”的累计键：任一变小就认为计数器归零过。
 _RESTART_KEYS = ("queries", "hits", "prompt", "prompt_cached", "ttft_count", "generation",
@@ -12,7 +19,7 @@ _INT_KEYS = ("running", "waiting", "queries", "hits", "prompt", "prompt_cached",
              "generation", "success", "req_prompt_sum", "req_generation_sum", "req_computed_sum",
              "drafted", "accepted")
 
-_DEFAULT_TPS = 2300.0  # 没给 prefill_tps 时 assumed 的预填充速度（token/秒）
+_DEFAULT_TPS = 2300.0  # 没给 prefill_tps 时假定的预填充速度（token/秒）
 
 
 def _share(total, n):
@@ -292,3 +299,135 @@ class VllmAdapter:
         metrics = {"waiting": m["waiting"], "kv_usage": [],
                    "ttft_sum": self._done_ttft_sum, "ttft_count": self._done_ttft_count}
         return health, metrics
+
+
+class EngineReader:
+    """带引擎识别的读取器：health / metrics / model_name / close 和 Fetcher 同义。
+
+    还没认出引擎时，每次 health() 按 base_urls 的顺序逐个地址试：先读 /health，
+    能解析成 TensorFold 就是 TensorFold；否则读 /metrics，能解析成 vLLM 读数
+    就是 vLLM。认出来之后只读认出的那个地址；连续 3 次读不到就忘掉，重新找。
+    """
+
+    def __init__(self, base_urls, make_fetcher=None, timeout_s=0.5) -> None:
+        self.base_urls = list(base_urls)
+        self._make_fetcher = make_fetcher
+        self._timeout_s = timeout_s
+        self._fetchers: dict[str, object] = {}   # 地址 → 读取器，第一次用到才建，建好留着复用
+        self.engine = None                       # "tensorfold" / "vllm"，没认出时 None
+        self.base_url = None                     # 认出的那个地址
+        self._adapter = VllmAdapter()
+        self._now = 0.0                          # 这次轮询的时刻，喂适配器时用
+        self._prefill_tps = None                 # 这次轮询的平均预填充速度
+        self._misses = 0                         # 连续读不到的次数
+        self._metrics = None                     # 最近一次 vLLM 的统一 metrics
+        self._context_length = None              # vLLM 的上下文上限
+
+    @property
+    def metrics_every_tick(self) -> bool:
+        """vLLM 的 metrics 不访问网络，每一拍都拿得出来，所以轮询每拍都读。"""
+        return self.engine == "vllm"
+
+    def prepare(self, now, prefill_tps) -> None:
+        """轮询每拍开头调一次：记下这次的时刻和平均预填充速度。"""
+        self._now = now
+        self._prefill_tps = prefill_tps
+
+    def health(self):
+        """读一次状态：还没认出引擎就挨个地址试，认出了只读认出的那个地址。"""
+        if self.engine is None:
+            result = self._probe()
+        elif self.engine == "tensorfold":
+            result = self._fetcher(self.base_url).health()
+        else:
+            result = self._vllm_health()
+        if result is not None:
+            self._misses = 0
+        elif self.engine is not None:
+            # 还没认出引擎时读不到不算“读不到”，不计数
+            self._misses += 1
+            if self._misses >= 3:  # 连续 3 次读不到就忘掉
+                self._forget()
+        return result
+
+    def metrics(self):
+        """TensorFold 读 /metrics；vLLM 用读 health 时顺带得到的那份（不访问网络）。"""
+        if self.engine == "tensorfold":
+            return self._fetcher(self.base_url).metrics()
+        if self.engine == "vllm":
+            return None if self._metrics is None else dict(self._metrics)
+        return None
+
+    def model_name(self):
+        """TensorFold 问 /v1/models；vLLM 问 /v1/models 并记下上下文上限。"""
+        if self.engine == "tensorfold":
+            return self._fetcher(self.base_url).model_name()
+        if self.engine == "vllm":
+            info = self._fetcher(self.base_url).model_info()
+            if info is None:
+                return None
+            self._context_length = info.get("max_model_len")
+            return info.get("id")
+        return None
+
+    def close(self) -> None:
+        """所有建过的读取器都关掉。"""
+        for fetcher in self._fetchers.values():
+            try:
+                fetcher.close()
+            except Exception:
+                pass
+
+    # ---- 内部 ----
+
+    def _fetcher(self, url):
+        """这个地址的读取器：第一次用到才建，之后留着复用。"""
+        fetcher = self._fetchers.get(url)
+        if fetcher is None:
+            fetcher = (Fetcher(url, timeout_s=self._timeout_s) if self._make_fetcher is None
+                       else self._make_fetcher(url))
+            self._fetchers[url] = fetcher
+        return fetcher
+
+    def _probe(self):
+        """还没认出引擎：按顺序逐个地址试，认出一个就停。"""
+        for url in self.base_urls:
+            fetcher = self._fetcher(url)
+            text = fetcher.get_text("/health")
+            if text is None:
+                continue
+            parsed = parse_health(text)
+            if parsed is not None:
+                self.engine = "tensorfold"
+                self.base_url = url
+                return parsed
+            m = parse_vllm_metrics(fetcher.get_text("/metrics"))
+            if m is not None:
+                self.engine = "vllm"
+                self.base_url = url
+                self._adapter.reset()
+                return self._feed(m)
+        return None
+
+    def _vllm_health(self):
+        """已经认出 vLLM：读 /metrics 喂适配器，返回适配器给的 health。"""
+        m = parse_vllm_metrics(self._fetcher(self.base_url).get_text("/metrics"))
+        if m is None:
+            return None
+        return self._feed(m)
+
+    def _feed(self, m):
+        """喂一次适配器，顺便记下这份统一 metrics 和它带的时刻。"""
+        health, metrics = self._adapter.feed(self._now, m, self._prefill_tps, self._context_length)
+        self._metrics = metrics
+        return health
+
+    def _forget(self):
+        """忘掉引擎：状态回到刚建好的样子，读取器都关掉，下次 health() 重新找。"""
+        self.engine = None
+        self.base_url = None
+        self._metrics = None
+        self._context_length = None
+        self._misses = 0
+        self._adapter.reset()
+        self.close()

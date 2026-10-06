@@ -36,8 +36,8 @@ from panel import render
 from panel.anim import Animator
 from panel.collector import Collector
 from panel.config import load_config
+from panel.engine import EngineReader
 from panel.poller import Poller
-from panel.sources import Fetcher
 from panel.usage import UsageLedger
 from panel.viewmodel import ViewModel
 
@@ -132,7 +132,7 @@ class PanelApp:
         """按正式运行的组装把轮询开在后台线程里。"""
         self.usage = UsageLedger(self.config, state_dir=self.state_dir)
         collector = Collector(self.config, self.usage)
-        self.fetcher = Fetcher(self.config.base_url)
+        self.fetcher = EngineReader(self.config.urls())
         self.poller = Poller(self.config, self.fetcher, collector)
         self.poll_thread = threading.Thread(
             target=self.poller.run,
@@ -398,7 +398,7 @@ def main(argv=None) -> int:
         log(f"启动：显示样例 {args.fixture}")
     else:
         mode = MODE_LIVE
-        log(f"启动：正式运行，轮询 {config.base_url}")
+        log("启动：正式运行，轮询 " + "、".join(config.urls()))
 
     # 正式运行用默认标志（同一时间只有一个实例）；样例 / 窗口模式不做唯一限制
     unique = not (args.fixture or args.windowed)
