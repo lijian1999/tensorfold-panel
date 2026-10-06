@@ -52,10 +52,12 @@ class _Prev:
     __slots__ = (
         "t", "c", "requests", "prompt", "cached", "prefill_s", "decode_s",
         "drafted", "accepted", "running", "arrive", "rows",
+        "epoch", "aborted", "finished_c",
     )
 
     def __init__(self, now, running, arrive, c, requests, prompt, cached,
-                 prefill_s, decode_s, drafted, accepted, rows=None):
+                 prefill_s, decode_s, drafted, accepted, rows=None,
+                 epoch=None, aborted=0, finished_c=None):
         self.t = now
         self.running = running      # 上次的在跑数
         self.arrive = arrive        # 上次的到达计数
@@ -68,6 +70,9 @@ class _Prev:
         self.drafted = drafted
         self.accepted = accepted
         self.rows = rows           # 上次的外挂行（没有外挂时为 None）
+        self.epoch = epoch         # 上次的引擎启动标记（vLLM 才有）
+        self.aborted = aborted     # 上次的中途断开累计数（vLLM 才有）
+        self.finished_c = finished_c  # 上次的“已结束请求的输出 token 累计”（vLLM 才有）
 
 
 class Collector:
@@ -83,6 +88,8 @@ class Collector:
         self._context_max = DEFAULT_CONTEXT_MAX
         self._context_used = 0
         self._hook = "missing"
+        self._engine = None        # 最近一次读数的 backend
+
         # 1. 读不到的处理
         self._fails = 0
         self._fail_start = None
@@ -110,6 +117,11 @@ class Collector:
         self._dec = 0
         self._pre = 0
         self._lanes_max = DEFAULT_LANES_MAX
+
+    @property
+    def prefill_tps(self) -> float:
+        """当前的平均预填充速度（滚动更新，只读）。"""
+        return self._prefill_tps
 
     # 入口
 
@@ -182,6 +194,10 @@ class Collector:
         self._fail_start = None
         self._ever_ok = True
 
+        backend = health.get("backend")
+        if isinstance(backend, str) and backend:
+            self._engine = backend
+
         requests = int(_number(health, "requests_total"))
         c = int(_number(health, "completion_tokens_total"))
         prompt = int(_number(health, "prompt_tokens_total"))
@@ -191,12 +207,26 @@ class Collector:
         drafted = int(_number(health, "drafted_total"))
         accepted = int(_number(health, "accepted_total"))
         running, dec, pre, lanes_max = self._streams(health)
+        # vLLM 才有的三个可选键：取不到都当没有
+        raw_epoch = health.get("epoch")
+        epoch = raw_epoch if isinstance(raw_epoch, (int, float)) and not isinstance(raw_epoch, bool) else None
+        aborted = int(_number(health, "aborted_total"))
+        raw_finished = health.get("completion_finished_total")
+        finished_c = (raw_finished if isinstance(raw_finished, (int, float)) and not isinstance(raw_finished, bool)
+                      else None)
 
         # 2.1 记账：把这次的累计值交给账本（账本自己算增量）；抛的异常一律吃掉
+        # vLLM 的读数把四项累计值放在 usage_totals 里；带引擎启动标记时一并交给账本
         if self.usage is not None:
+            totals = health.get("usage_totals")
+            if isinstance(totals, dict):
+                for_usage = {key: totals.get(key) for key in ("prompt", "cached", "completion", "requests")}
+            else:
+                for_usage = {"prompt": prompt, "cached": cached, "completion": c, "requests": requests}
+            if epoch is not None:
+                for_usage["epoch"] = epoch
             try:
-                self.usage.update({"prompt": prompt, "cached": cached, "completion": c,
-                                   "requests": requests})
+                self.usage.update(for_usage)
             except Exception:
                 pass
 
@@ -211,8 +241,10 @@ class Collector:
         self._dec, self._pre, self._lanes_max = dec, pre, lanes_max
 
         prev = self._prev
-        # 2.2 模型重启：累计值变小，这次当作没有上次
-        restart = prev is not None and (requests < prev.requests or c < prev.c)
+        # 2.2 模型重启：累计值变小，或引擎换了个启动标记，这次当作没有上次
+        restart = prev is not None and (requests < prev.requests or c < prev.c
+                                        or (epoch is not None and prev.epoch is not None
+                                            and epoch != prev.epoch))
         if restart:
             prev = None
             self._clear_running()
@@ -228,10 +260,10 @@ class Collector:
             finished = requests - prev.requests
             if finished >= 1:
                 self._on_finish(now, prev, finished, c, prompt, cached,
-                               prefill_s, decode_s, drafted, accepted, running)
+                               prefill_s, decode_s, drafted, accepted, running, finished_c)
 
         # 2.5 请求到达（模型重启那次连到达也不记：重启那次读数不产生新一轮）
-        arrive = requests + int(_number(health, "requests_running"))
+        arrive = requests + int(_number(health, "requests_running")) + aborted
         if restart:
             arrived = 0
         elif prev is None:
@@ -241,6 +273,11 @@ class Collector:
         if arrived >= 1:
             self._arrive_at = now
             self._on_arrive(now, prev, finished, c)
+
+        # 中途断开也算本轮的一次活动：本轮的最后活动时刻记成断开的这次
+        if (not restart and prev is not None and aborted > prev.aborted
+                and self._round is not None):
+            self._round["end"] = now
 
         # 2.6 忙碌段
         self._busy_section(now, prev, finished, running, c)
@@ -264,7 +301,8 @@ class Collector:
 
         snap = self._build_snapshot(state, decode, prefill, running)
         self._prev = _Prev(now, running, arrive, c, requests, prompt, cached,
-                          prefill_s, decode_s, drafted, accepted, self._rows)
+                          prefill_s, decode_s, drafted, accepted, self._rows,
+                          epoch, aborted, finished_c)
         return snap
 
     @staticmethod
@@ -312,13 +350,18 @@ class Collector:
         return max(running, dec + pre), dec, pre, maximum
 
     def _on_finish(self, now, prev, finished, c, prompt, cached, prefill_s,
-                   decode_s, drafted, accepted, running) -> None:
+                   decode_s, drafted, accepted, running, finished_c=None) -> None:
         """2.4 请求结束：差值算成这个请求的成绩，并记进本轮。"""
         survivors = prev.running - finished
         busy = self._busy
         # 现存输出：这次还在解码的外挂行已输出的 token 之和
         existing = self._rows_output(self._rows)
-        if survivors <= 0:
+        if prev.finished_c is not None and finished_c is not None:
+            # vLLM 给了“已结束请求的输出 token 累计”：直接相减，不用估算
+            completion = max(0, int(finished_c - prev.finished_c))
+            if survivors > 0 and busy is not None:
+                busy["used"] += completion
+        elif survivors <= 0:
             # 之前在跑的全结束了：从忙碌起点的 C 减出精确值
             if busy is None:
                 completion = 0
@@ -445,13 +488,17 @@ class Collector:
             if sid is None:
                 continue
             entry = self._stream.get(sid)
+            row_start = row.get("start")
+            has_start = isinstance(row_start, (int, float)) and not isinstance(row_start, bool)
             if entry is None:                       # 新出现的 id
-                start = now if self._arrive_at is None else self._arrive_at
+                # 行里有开始时刻就用它，否则按这次读到算
+                start = float(row_start) if has_start else (now if self._arrive_at is None else self._arrive_at)
                 points = []
                 if row.get("phase") == "prefill":
                     points = [(now, _number(row, "filled", 0))]
             else:
-                start = entry["start"]
+                # 每次读数都按行里的开始时刻更新
+                start = float(row_start) if has_start else entry["start"]
                 points = list(entry["points"])
                 if row.get("phase") == "prefill":
                     filled = _number(row, "filled", 0)
@@ -517,6 +564,11 @@ class Collector:
             ttft = busy["first"] - busy["start"]
         else:
             ttft = None
+        # vLLM：只有一条流时，行里直接给了这条流的首字时间
+        if (self._rows is not None and len(self._rows) == 1 and self._running == 1):
+            value = self._rows[0].get("ttft_s")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                ttft = value
         if self._hook == "ok":
             # 外挂好用：直接数解码中那几条已输出的 token
             output = self._rows_output(self._rows)
@@ -556,6 +608,7 @@ class Collector:
             "remaining_s": None,
             "est_s": None,
             "cache_miss": False,
+            "estimated": False,
         }
 
     def _prefill_from_hook(self, now: float) -> dict:
@@ -574,6 +627,20 @@ class Collector:
         speeds = [self._stream_tps[row["id"]] for row in rows if self._stream_tps.get(row.get("id")) is not None]
         tps = sum(speeds) if speeds else None
         est = (prompt - cached) / self._prefill_tps
+        if rows and any("filled" not in row for row in rows):
+            # vLLM 的行里没有 filled：只能按平均速度估已算到的位置，进度最高按 99%
+            frac = 0.99 if est <= 0 else min(0.99, elapsed / est)
+            return {
+                "elapsed_s": elapsed,
+                "prompt_tokens": prompt,
+                "cached_tokens": cached,
+                "filled_tokens": cached + js_round((prompt - cached) * frac),
+                "tps": self._prefill_tps,
+                "remaining_s": max(0.0, est - elapsed),
+                "est_s": est,
+                "cache_miss": self._cache_miss(rows, prompt, cached),
+                "estimated": True,
+            }
         if tps is not None and tps > 0:
             remaining = (prompt - filled) / tps
         else:
@@ -587,6 +654,7 @@ class Collector:
             "remaining_s": remaining,
             "est_s": est,
             "cache_miss": self._cache_miss(rows, prompt, cached),
+            "estimated": False,
         }
 
     def _cache_miss(self, rows, prompt: int, cached: int) -> bool:
@@ -687,6 +755,7 @@ class Collector:
             "version": 2,
             "state": "idle",
             "hook": self._hook,
+            "engine": self._engine,
             "model": self._model if self._model else self.config.model_name,
             "context_max": self._context_max,
             "lanes": {"max": self._lanes_max, "decoding": self._dec, "prefilling": self._pre, "waiting": 0},

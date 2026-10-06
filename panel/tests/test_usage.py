@@ -281,5 +281,72 @@ class TestTimezone(LedgerTest):
         self.assertEqual(ledger.today()["date"], "2026-10-04")
 
 
+class TestEpoch(LedgerTest):
+    """引擎启动标记：vLLM 的 epoch 变了就把整个累计值算作增量。"""
+
+    def test_第一次读只记基线并写下标记(self):
+        ledger = self.ledger()
+        ledger.update(dict(TOTALS, epoch=1000.0))
+        self.assertEqual(self.four(ledger.today()), (0, 0, 0, 0))
+        saved = self.read_usage()
+        self.assertEqual(saved["last_epoch"], 1000.0)
+        self.assertEqual(saved["last_totals"], TOTALS, "存的就是四个累计值")
+        self.assertEqual(set(saved["last_totals"]), {"prompt", "cached", "completion", "requests"})
+
+    def test_同一个标记算差值(self):
+        ledger = self.ledger()
+        ledger.update(dict(TOTALS, epoch=1000.0))
+        ledger.update(dict(BIGGER, epoch=1000.0))
+        self.assertEqual(self.four(ledger.today()), (500, 200, 30, 2))
+
+    def test_标记变了算整个(self):
+        ledger = self.ledger()
+        ledger.update(dict(TOTALS, epoch=1000.0))
+        ledger.update(dict(BIGGER, epoch=2000.0))
+        self.assertEqual(self.four(ledger.today()), (1500, 600, 80, 5),
+                         "换了引擎或重启了：这次的累计值整个算增量")
+
+    def test_有标记变没标记算整个(self):
+        ledger = self.ledger()
+        ledger.update(dict(TOTALS, epoch=1000.0))
+        ledger.update(dict(BIGGER))
+        self.assertEqual(self.four(ledger.today()), (1500, 600, 80, 5))
+        ledger.flush()
+        self.assertNotIn("last_epoch", self.read_usage(), "没有标记就不写这个键")
+
+    def test_没标记变有标记算整个(self):
+        ledger = self.ledger()
+        ledger.update(TOTALS)
+        ledger.update(dict(BIGGER, epoch=1000.0))
+        self.assertEqual(self.four(ledger.today()), (1500, 600, 80, 5))
+
+    def test_两边都没标记算差值(self):
+        ledger = self.ledger()
+        ledger.update(TOTALS)
+        ledger.update(BIGGER)
+        self.assertEqual(self.four(ledger.today()), (500, 200, 30, 2))
+        self.assertNotIn("last_epoch", self.read_usage(), "只用 TensorFold 时文件内容和以前一样")
+
+    def test_重新加载后接着算差值(self):
+        ledger = self.ledger()
+        ledger.update(dict(TOTALS, epoch=1000.0))
+        ledger.flush()
+        second = self.ledger()
+        second.update(dict(BIGGER, epoch=1000.0))
+        self.assertEqual(self.four(second.today()), (500, 200, 30, 2))
+
+    def test_标记不是数字按没有标记(self):
+        for bad in ("x", True):
+            with self.subTest(bad=bad):
+                self._tmp.cleanup()
+                self._tmp = tempfile.TemporaryDirectory()
+                self.dir = self._tmp.name
+                self.addCleanup(self._tmp.cleanup)
+                ledger = self.ledger()
+                ledger.update(TOTALS)
+                ledger.update(dict(BIGGER, epoch=bad))
+                self.assertEqual(self.four(ledger.today()), (500, 200, 30, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

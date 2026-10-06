@@ -829,5 +829,265 @@ class TestPrefillSpeed(unittest.TestCase):
                                msg="500 个新算 token 太少，2360 不变")
 
 
+class TestEngineField(unittest.TestCase):
+    """14. 快照里的 engine 和 prefill 的 estimated。"""
+
+    def test_新建时平均预填充速度是2300(self):
+        self.assertEqual(Collector(Config()).prefill_tps, 2300.0)
+
+    def test_engine取最近一次读数的backend(self):
+        scene = Scene(Collector(Config()))
+        self.assertIsNone(scene.at(1.0, health(**BASE))["engine"], "没有 backend 时是 None")
+        self.assertEqual(scene.at(2.0, dict(health(**BASE), backend="tensorfold"))["engine"],
+                         "tensorfold")
+        for t in (3.0, 4.0, 5.0):
+            snap = scene.at(t, None)
+            self.assertEqual(snap["engine"], "tensorfold", f"t={t} 离线时该沿用最近一次的值")
+        self.assertEqual(scene.last_snap()["state"], "offline", "第三次读不到才进离线")
+
+    def filled_at(self, elapsed):
+        """和 TestHookPrefill 一样：预填充开始后 0.9/1.8/2.7 秒各涨 2048。"""
+        if elapsed < 0.9 - 1e-9:
+            return 0
+        if elapsed < 1.8 - 1e-9:
+            return 2048
+        if elapsed < 2.7 - 1e-9:
+            return 4096
+        return 6144
+
+    def test_外挂好用时estimated是False(self):
+        scene = Scene(Collector(Config()))
+        scene.at(1.0, health(**BASE))
+        for t in every_tenth(10.0, 10.5):
+            row = {"id": 1, "phase": "prefill", "prompt": 24615, "cached": 0,
+                   "filled": self.filled_at(round(t - 10.0, 6))}
+            scene.at(t, health(running=1, pre=1, hook=hook_rows(row), **BASE))
+        self.assertIs(scene.last_snap()["prefill"]["estimated"], False,
+                      "有 filled 就是准数，不算估算")
+
+    def test_外挂失效时estimated是False(self):
+        scene = Scene(Collector(Config()))
+        scene.at(1.0, health(**BASE))
+        metrics = {"waiting": 0, "kv_usage": [0.093899, 0.0], "ttft_sum": 1599.727361, "ttft_count": 156}
+        for t in (10.0, 10.1, 10.2, 10.3, 10.4):
+            scene.at(t, health(running=1, pre=1, **BASE), metrics=metrics)
+        prefill = scene.last_snap()["prefill"]
+        self.assertIs(prefill["estimated"], False, "降级分支也标成不是估算")
+        self.assertIsNone(prefill["filled_tokens"])
+
+
+def vhealth(running=0, dec=0, pre=0, total=20, c=2000, prompt=160000, cached=30000, prefill_s=60.0,
+            decode_s=61.0, drafted=5000, accepted=1300, maximum=4, epoch=1000.0, aborted=0,
+            finished_c=1900, usage=None, rows=()):
+    """造一份 vLLM 适配器给出的统一读数（空闲基线：结束过 20 个请求）。"""
+    return {
+        "ok": True, "backend": "vllm", "requests_running": running,
+        "streams": {"decoding": dec, "prefilling": pre, "max": maximum},
+        "requests_total": total, "completion_tokens_total": c, "prompt_tokens_total": prompt,
+        "cached_tokens_total": cached, "prefill_seconds_total": prefill_s, "decode_seconds_total": decode_s,
+        "drafted_total": drafted, "accepted_total": accepted, "context_length": 262144,
+        "epoch": epoch, "aborted_total": aborted, "completion_finished_total": finished_c,
+        "usage_totals": usage or {"prompt": 160100, "cached": 30000, "completion": c, "requests": total},
+        "tfpanel": {"v": 1, "streams": list(rows)},
+    }
+
+
+def vmetrics(ttft_sum=60.0, ttft_count=20):
+    return {"waiting": 0, "kv_usage": [], "ttft_sum": ttft_sum, "ttft_count": ttft_count}
+
+
+def vrow(sid, phase, prompt, cached=0, output=0, start=0.0, ttft=None):
+    """vLLM 适配器合成的一行：没有 filled，有 start 和 ttft_s。"""
+    return {"id": sid, "phase": phase, "prompt": prompt, "cached": cached, "output": output,
+            "start": start, "ttft_s": ttft}
+
+
+def vllm_long_scene(usage=None):
+    """一个 24085 token 的请求：1.5 开始，3.5 才第一次被读到，10.4 出首字，13.5 结束，输出 160。"""
+    collector = Collector(Config(), usage)
+    scene = Scene(collector)
+    scene.at(1.0, vhealth(), vmetrics())
+    for t in every_tenth(3.5, 10.3):
+        scene.at(t, vhealth(running=1, pre=1, rows=[vrow(1, "prefill", 24085, start=1.5)]), vmetrics())
+    n = 0
+    for t in every_tenth(10.4, 13.4):
+        n += 5
+        scene.at(t, vhealth(running=1, dec=1, c=2000 + n,
+                           rows=[vrow(1, "decode", 24085, output=n, start=1.06, ttft=9.34)],
+                           usage={"prompt": 184185, "cached": 30000, "completion": 2000 + n, "requests": 20}),
+                 vmetrics())
+    scene.at(13.5, vhealth(total=21, c=2160, prompt=184085, prefill_s=69.284, decode_s=64.155,
+                           drafted=5420, accepted=1401, finished_c=2060,
+                           usage={"prompt": 184185, "cached": 30000, "completion": 2160, "requests": 21}),
+             vmetrics(69.34, 21))
+    return collector, scene
+
+
+class TestVllmSingle(unittest.TestCase):
+    """15. vLLM 单个请求的全过程：预填充只能估算、首字和输出用行里和准数。"""
+
+    def test_预填充用行里的开始时刻估算(self):
+        collector, scene = vllm_long_scene()
+        snap = scene.snap_at(3.5)
+        self.assertEqual(snap["state"], "prefill")
+        self.assertEqual(snap["hook"], "ok")
+        self.assertEqual(snap["engine"], "vllm")
+        self.assertEqual(snap["lanes"]["max"], 4)
+        prefill = snap["prefill"]
+        self.assertIs(prefill["estimated"], True, "行里没有 filled，只能估算")
+        self.assertAlmostEqual(prefill["elapsed_s"], 2.0, places=6,
+                               msg="从行里的 start 算，不是从第一次读到算")
+        self.assertEqual(prefill["prompt_tokens"], 24085)
+        self.assertEqual(prefill["cached_tokens"], 0)
+        self.assertAlmostEqual(prefill["est_s"], 24085 / 2300, places=4)
+        self.assertEqual(prefill["filled_tokens"], 4600)
+        self.assertEqual(prefill["tps"], 2300.0)
+        self.assertAlmostEqual(prefill["remaining_s"], 24085 / 2300 - 2.0, places=4)
+        self.assertIs(prefill["cache_miss"], False)
+
+    def test_预填充快到最后(self):
+        collector, scene = vllm_long_scene()
+        prefill = scene.snap_at(10.3)["prefill"]
+        self.assertEqual(prefill["filled_tokens"], 20240, msg="8.8 秒 × 2300 tok/s")
+        self.assertAlmostEqual(prefill["elapsed_s"], 8.8, places=6)
+
+    def test_估算进度最多到99(self):
+        from panel.collector import js_round
+        collector = Collector(Config())
+        scene = Scene(collector)
+        scene.at(1.0, vhealth(), vmetrics())
+        for t in every_tenth(3.5, 40.0, dt=0.5):
+            scene.at(t, vhealth(running=1, pre=1, rows=[vrow(1, "prefill", 24085, start=1.5)]),
+                     vmetrics())
+        prefill = scene.snap_at(40.0)["prefill"]
+        self.assertEqual(prefill["filled_tokens"], js_round(24085 * 0.99), msg="23844：进度封顶")
+        self.assertEqual(prefill["remaining_s"], 0.0)
+
+    def test_解码中的首字取行里给的(self):
+        collector, scene = vllm_long_scene()
+        snap = scene.snap_at(11.0)
+        self.assertEqual(snap["state"], "decode")
+        self.assertAlmostEqual(snap["decode"]["ttft_s"], 9.34, places=6,
+                               msg="行里给了 9.34，不该用估算的 6.9")
+        self.assertEqual(snap["decode"]["output_tokens"], 35)
+        self.assertEqual(snap["context_used"], 24120)
+
+    def test_结束后的各项数字(self):
+        collector, scene = vllm_long_scene()
+        snap = scene.snap_at(13.5)
+        self.assertEqual(snap["state"], "done")
+        last = snap["last"]
+        self.assertEqual(last["prompt_tokens"], 24085)
+        self.assertEqual(last["cached_tokens"], 0)
+        self.assertEqual(last["completion_tokens"], 160, msg="用完成数之差 2060 − 1900")
+        self.assertAlmostEqual(last["decode_tps"], 160 / 3.155, places=4)
+        self.assertAlmostEqual(last["prefill_tps"], 24085 / 9.284, places=4)
+        self.assertAlmostEqual(last["ttft_s"], 9.34, places=4)
+        self.assertAlmostEqual(last["acceptance_rate"], 101 / 420, places=4)
+        self.assertEqual(last["context_used"], 24245)
+        self.assertAlmostEqual(collector.prefill_tps, 0.7 * 2300 + 0.3 * 24085 / 9.284, places=4)
+
+    def test_记账带引擎启动标记(self):
+        usage = FakeUsage()
+        collector, scene = vllm_long_scene(usage=usage)
+        self.assertEqual(usage.calls[0], {"prompt": 160100, "cached": 30000, "completion": 2000,
+                                          "requests": 20, "epoch": 1000.0})
+        self.assertEqual(usage.calls[-1], {"prompt": 184185, "cached": 30000, "completion": 2160,
+                                           "requests": 21, "epoch": 1000.0})
+
+
+class TestVllmFinishExact(unittest.TestCase):
+    """16. 并发时结束的那个请求的输出用完成数这个准数。"""
+
+    def test_结束的输出用完成数之差(self):
+        collector = Collector(Config())
+        scene = Scene(collector)
+        scene.at(1.0, vhealth(), vmetrics())
+        scene.at(2.0, vhealth(running=2, dec=2, c=2287,
+                             rows=[vrow(1, "decode", 71, output=170, ttft=0.13),
+                                   vrow(2, "decode", 3066, output=117, ttft=1.25)]), vmetrics())
+        snap = scene.at(2.1, vhealth(running=1, dec=1, total=21, c=2300, prompt=163066,
+                                     prefill_s=61.21, decode_s=63.83, finished_c=2050,
+                                     rows=[vrow(1, "decode", 71, output=250, ttft=0.13)]),
+                        vmetrics(61.25, 21))
+        last = snap["last"]
+        self.assertEqual(last["completion_tokens"], 150, msg="2050 − 1900，不是行里估的 117")
+        self.assertEqual(last["prompt_tokens"], 3066)
+        self.assertAlmostEqual(last["ttft_s"], 1.25, places=4)
+        self.assertEqual(snap["state"], "decode", "还剩一条在解码，不进完成画面")
+
+
+class TestVllmAbort(unittest.TestCase):
+    """17. 中途断开：不产生完成画面，但算本轮的一次活动。"""
+
+    def drive(self):
+        """10.0 到 19.9 一条在解码，20.0 断开。"""
+        collector = Collector(Config())
+        scene = Scene(collector)
+        scene.at(1.0, vhealth(), vmetrics())
+        for t in every_tenth(10.0, 19.9):
+            k = int(round((t - 10) * 10))
+            scene.at(t, vhealth(running=1, dec=1, c=2000 + k,
+                               rows=[vrow(1, "decode", 67, output=k, start=9.9, ttft=0.13)]),
+                     vmetrics())
+        scene.at(20.0, vhealth(c=2100, aborted=1), vmetrics())
+        return collector, scene
+
+    def test_断开那次是空闲(self):
+        collector, scene = self.drive()
+        snap = scene.snap_at(20.0)
+        self.assertEqual(snap["state"], "idle", "没有请求结束，不该有完成画面")
+        self.assertIsNone(snap["last"])
+        self.assertEqual(snap["lanes"]["decoding"], 0)
+        self.assertEqual(snap["lanes"]["prefilling"], 0)
+        rnd = snap["round"]
+        self.assertEqual(rnd["requests"], 0)
+        self.assertEqual(rnd["running"], 0)
+        self.assertEqual(rnd["output_tokens"], 100)
+
+    def test_断开的时刻算本轮的最后活动(self):
+        collector, scene = self.drive()
+        scene.at(75.0, vhealth(c=2100, aborted=1), vmetrics())
+        self.assertIs(scene.snap_at(75.0)["round"]["active"], True,
+                      "一轮的最后活动是断开的 20.0，不是这一轮开始的 10.0")
+        scene.at(81.0, vhealth(c=2100, aborted=1), vmetrics())
+        self.assertIs(scene.snap_at(81.0)["round"]["active"], False)
+
+    def test_断开之后来了正常请求(self):
+        collector, scene = self.drive()
+        scene.at(75.0, vhealth(c=2100, aborted=1), vmetrics())
+        scene.at(81.0, vhealth(c=2100, aborted=1), vmetrics())
+        scene.at(90.0, vhealth(running=1, dec=1, c=2110, aborted=1,
+                              rows=[vrow(2, "decode", 65, output=10, start=89.9, ttft=0.12)]),
+                 vmetrics())
+        snap = scene.at(90.5, vhealth(total=21, c=2140, aborted=1, prompt=160065,
+                                      prefill_s=60.1, decode_s=61.6, finished_c=1940),
+                        vmetrics(60.12, 21))
+        self.assertEqual(snap["state"], "done")
+        last = snap["last"]
+        self.assertEqual(last["completion_tokens"], 40, msg="1940 − 1900")
+        self.assertEqual(last["prompt_tokens"], 65)
+        self.assertAlmostEqual(last["ttft_s"], 0.12, places=4)
+        self.assertEqual(snap["round"]["requests"], 1, "断开不算一个请求")
+        self.assertEqual(snap["round"]["output_tokens"], 40)
+
+
+class TestVllmRestart(unittest.TestCase):
+    """18. 引擎换了启动标记：当作重启，既不产生结束也不开新一轮。"""
+
+    def test_启动标记变了当作重启(self):
+        collector = Collector(Config())
+        scene = Scene(collector)
+        scene.at(1.0, vhealth(), vmetrics())
+        scene.at(2.0, vhealth(running=1, dec=1, c=2010,
+                             rows=[vrow(1, "decode", 67, output=10, ttft=0.1)]), vmetrics())
+        snap = scene.at(2.1, vhealth(total=30, c=5000, prompt=200000, finished_c=4900,
+                                     epoch=2000.0), vmetrics())
+        self.assertEqual(snap["state"], "idle", "累计值都变大了，但只有启动标记变了")
+        self.assertIsNone(snap["round"])
+        self.assertIsNone(snap["last"])
+        self.assertEqual(snap["engine"], "vllm")
+
+
 if __name__ == "__main__":
     unittest.main()

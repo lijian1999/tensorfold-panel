@@ -55,6 +55,7 @@ class UsageLedger:
         self._save_interval_s = save_interval_s
         self._counters: dict = {key: 0 for key in _COUNTERS}
         self._last_totals: dict | None = None  # 上一次读到的累计值；None 表示还没有基线
+        self._last_epoch: float | None = None   # 上次读数的引擎启动标记（vLLM 才有）
         self._date: str | None = None
         self._pending = False                  # 文件和内存里的账一致，没有要写的东西
         self._last_write: float | None = None  # 上次写文件时的时刻
@@ -68,15 +69,23 @@ class UsageLedger:
         self._roll_day(now)
         if not self._valid(totals):
             return  # 缺键或值不是整数：整次忽略
+        # 引擎启动标记：不是数字就当没有（只用 TensorFold 时一直是 None）
+        epoch = totals.get("epoch")
+        if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
+            epoch = None
         last = self._last_totals
+        epoch_changed = epoch != self._last_epoch
         if last is None:
             delta = None  # 第一次运行：只记下基线，不动账
+        elif epoch_changed:
+            delta = {key: totals[key] for key in _SOURCE_KEYS}  # 引擎重启或换了引擎：整个算增量
         elif any(totals[key] < last[key] for key in _SOURCE_KEYS):
             delta = {key: totals[key] for key in _SOURCE_KEYS}  # 模型重启过：整个算增量
         else:
             delta = {key: totals[key] - last[key] for key in _SOURCE_KEYS}
-        self._last_totals = dict(totals)
-        if delta is None or any(delta.values()):
+        self._last_totals = {key: totals[key] for key in _SOURCE_KEYS}
+        self._last_epoch = epoch
+        if delta is None or epoch_changed or any(delta.values()):
             self._pending = True
         if delta is not None:
             for counter, src in zip(_COUNTERS, _SOURCE_KEYS):
@@ -146,6 +155,8 @@ class UsageLedger:
             "requests": self._counters["requests"],
             "last_totals": self._last_totals,
         }
+        if self._last_epoch is not None:
+            payload["last_epoch"] = self._last_epoch
         if self._write_text(USAGE_FILE, json.dumps(payload, ensure_ascii=False) + "\n"):
             self._pending = False
             self._last_write = self._clock()
@@ -200,6 +211,8 @@ class UsageLedger:
         self._date = date
         self._counters = {key: data[key] for key in _COUNTERS}
         self._last_totals = {key: last[key] for key in _SOURCE_KEYS}
+        epoch = data.get("last_epoch")
+        self._last_epoch = epoch if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) else None
         return True
 
     def _write_text(self, name: str, text: str, append: bool = False) -> bool:
