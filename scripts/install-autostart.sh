@@ -34,7 +34,7 @@ cat >"$AUTOSTART_DIR/tfpanel.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=TFPanel 副屏仪表盘
-Comment=在拓展坞副屏上显示 TensorFold 的运行状态
+Comment=在拓展坞副屏上显示推理引擎的运行状态
 Exec=$APP_DIR/scripts/tfpanel.sh start
 Terminal=false
 X-GNOME-Autostart-enabled=true
