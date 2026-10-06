@@ -3,7 +3,7 @@
 你是执行者。任务说明由编排者（Claude）给出，完成后由编排者独立验收，所以：
 - 严格按任务说明做，不要做说明之外的功能，不要改说明没提到的文件。
 - 说明里写的接口、字段名、文件路径必须一字不差。
-- 说明有歧义时，按 `docs/design.md` 和 `docs/dashboard-prototype.html` 判断；两者冲突以原型为准。
+- 说明有歧义时，按 `docs/design.md`、`docs/design-vllm.md`（vLLM 相关的以它为准）和 `docs/dashboard-prototype.html` 判断；文档和原型冲突以原型为准。
 - 完成前必须亲自运行说明里列出的检查命令，全部通过才算完成。不能跳过测试、不能为了通过而删改测试断言。
 - 最后一行只输出 `DONE` 或 `FAILED: <原因>`。
 
@@ -25,17 +25,18 @@
 - `docs/` 设计文档、原型、任务说明（只读，除非任务明确要求修改）
 - `docs/prototype-shots/` 原型各画面在副屏上的实拍截图（只读）
 - `docs/spike-hook/` 验证外挂机制时的草稿（只读，仅供参考，不是正式实现）
-- `panel/` 副屏程序（Python 包）：读取、采集、今日用量、视图模型、绘制、窗口
+- `panel/` 副屏程序（Python 包）：读取、引擎适配、采集、今日用量、视图模型、绘制、窗口
 - `panel/tests/` 测试（只用标准库 `unittest`）
 - `hook/` 容器内外挂的两个文件和生成补丁的脚本
 - `fixtures/` 各状态的指标快照样例（JSON）
+- `fixtures/vllm/` 在真实 vLLM 上录下来的 `/metrics` 原文和读数序列（只读）
 - `scripts/` 同步到 Spark、安装启动项、离屏截图
 - `scripts/dev/` 在副屏上看原型、截副屏的小工具
 
 ## 技术约束
 
 - Python：按 3.12 写（Spark 的系统 Python 是 3.12.3，路径 `/usr/bin/python3`）。
-- 读取、采集、今日用量、视图模型只能用标准库，不能依赖 GTK。它们的测试在 MacBook Pro（`python3`）和 Spark 上都要能跑。
+- 读取、引擎适配、采集、今日用量、视图模型只能用标准库，不能依赖 GTK。它们的测试在 MacBook Pro（`python3`）和 Spark 上都要能跑。
 - 绘制和窗口用 Spark 系统自带的 GTK 4、cairo、Pango（通过 `gi`）。这部分只能在 Spark 上运行和测试。
 - 测试只用标准库 `unittest`。
 - 不安装任何第三方依赖：`pip`、`apt`、`npm`、`brew` 都不行。
