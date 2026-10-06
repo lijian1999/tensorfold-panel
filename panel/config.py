@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
 @dataclass
 class Config:
-    base_url: str = "http://127.0.0.1:8888"
+    base_url: str = ""                    # 非空时只用这一个地址（兼容旧配置）
+    base_urls: list[str] = field(default_factory=lambda: ["http://127.0.0.1:8888", "http://127.0.0.1:8000"])  # 按顺序试，用第一个认得出引擎的
     monitor_match: str = "manufacturer"     # "manufacturer" 或 "connector"
     monitor_value: str = "DRS"
     round_gap_s: float = 60.0               # 一轮间隔
@@ -26,6 +27,12 @@ class Config:
     state_dir: str = "~/.local/state/tfpanel"
     model_name: str = "Qwen3.8-Flash-Next"  # 读不到模型名时用
 
+    def urls(self) -> list[str]:
+        """要试的接口地址：base_url 非空只用它，否则用 base_urls 的一份拷贝。"""
+        if self.base_url:
+            return [self.base_url]
+        return list(self.base_urls)
+
 
 def _coerce(default: Any, value: Any) -> Any:
     """类型对得上就采用，对不上就放弃这个键（bool 不算数字）。"""
@@ -37,6 +44,11 @@ def _coerce(default: Any, value: Any) -> Any:
         return value if isinstance(value, (int, float)) else default
     if isinstance(default, str):
         return value if isinstance(value, str) else default
+    if isinstance(default, list):
+        # 列表：非空、每一项都是非空字符串才采用，采用时拷贝一份
+        if isinstance(value, list) and value and all(isinstance(v, str) and v for v in value):
+            return list(value)
+        return default
     return value
 
 

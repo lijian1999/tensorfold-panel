@@ -129,7 +129,8 @@ class TestV2F(unittest.TestCase):
 class TestConfig(unittest.TestCase):
     def test_defaults(self):
         expected = {
-            "base_url": "http://127.0.0.1:8888",
+            "base_url": "",
+            "base_urls": ["http://127.0.0.1:8888", "http://127.0.0.1:8000"],
             "monitor_match": "manufacturer",
             "monitor_value": "DRS",
             "round_gap_s": 60.0,
@@ -198,6 +199,50 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(c.monitor_match, "connector")
         self.assertEqual(c.monitor_value, "USB-C-0")
         self.assertEqual(c.done_hold_s, 4.0)
+
+
+class TestConfigUrls(unittest.TestCase):
+    """接口地址列表：base_url 优先，base_urls 非法就用默认的两个。"""
+
+    DEFAULTS = ["http://127.0.0.1:8888", "http://127.0.0.1:8000"]
+
+    def load(self, data: dict) -> Config:
+        """把 data 写成配置文件再读回来。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            return load_config(path)
+
+    def test_default_urls(self):
+        """默认配置就是两个地址，改返回的列表不影响下一次。"""
+        c = Config()
+        self.assertEqual(c.urls(), self.DEFAULTS)
+        got = c.urls()
+        got.append("http://127.0.0.1:9")
+        self.assertEqual(c.urls(), self.DEFAULTS)
+        self.assertIsNot(c.urls(), c.base_urls)
+
+    def test_only_base_url(self):
+        """只写了 base_url：只用这一个地址。"""
+        self.assertEqual(self.load({"base_url": "http://127.0.0.1:1"}).urls(), ["http://127.0.0.1:1"])
+
+    def test_only_base_urls(self):
+        """只写了 base_urls：就是它，而且是拷贝的一份。"""
+        c = self.load({"base_urls": ["http://127.0.0.1:1"]})
+        self.assertEqual(c.urls(), ["http://127.0.0.1:1"])
+        self.assertIsNot(c.urls(), c.base_urls)
+
+    def test_both(self):
+        """两个都写了：base_url 说的算。"""
+        c = self.load({"base_url": "http://127.0.0.1:1", "base_urls": ["http://127.0.0.1:2", "http://127.0.0.1:3"]})
+        self.assertEqual(c.urls(), ["http://127.0.0.1:1"])
+
+    def test_bad_base_urls(self):
+        """写成字符串、空列表、含数字、含空字符串：都用默认的两个地址。"""
+        for bad in ("http://127.0.0.1:1", [], ["", "http://127.0.0.1:2"], [1], ["http://127.0.0.1:1", 2], True):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.load({"base_urls": bad}).urls(), self.DEFAULTS)
 
 
 class TestView(unittest.TestCase):

@@ -3,6 +3,7 @@
 不访问真实的 8888 端口：需要 HTTP 时在 127.0.0.1 的随机端口上起一个假服务。
 """
 
+import json
 import os
 import tempfile
 import threading
@@ -10,7 +11,11 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from panel.sources import Fetcher, parse_health, parse_meminfo, parse_metrics, read_meminfo
+from panel.sources import (Fetcher, VLLM_FIELDS, parse_health, parse_meminfo, parse_metrics,
+                          parse_vllm_metrics, read_meminfo)
+
+# 测试用的快照样例（仓库根目录下的 fixtures/）
+FIXTURES = os.path.join(os.path.dirname(__file__), "..", "..", "fixtures")
 
 METRICS_TEXT = """# HELP tensorfold:requests_waiting x
 # TYPE tensorfold:requests_waiting gauge
@@ -141,6 +146,83 @@ class TestParseMetrics(unittest.TestCase):
         self.assertEqual(parse_metrics(text)["kv_usage"], [0.2])
 
 
+class TestParseVllmMetrics(unittest.TestCase):
+    """vLLM /metrics 的解析：键和顺序都照 VLLM_FIELDS。"""
+
+    def fixture(self, name: str) -> str:
+        with open(os.path.join(FIXTURES, "vllm", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_real_metrics(self):
+        """真实的 /metrics 原文：结果和期望一致，键的顺序就是 VLLM_FIELDS。"""
+        got = parse_vllm_metrics(self.fixture("metrics-b.txt"))
+        want = json.loads(self.fixture("metrics-b.expect.json"))
+        self.assertEqual(got, want)
+        self.assertEqual(tuple(got), VLLM_FIELDS)
+        self.assertIsInstance(got["success"], int)
+        self.assertIsInstance(got["ttft_sum"], float)
+
+    def test_labels_sum(self):
+        """同一个指标名好几行（标签不同）：数值加起来。"""
+        text = ("vllm:num_requests_running 1\n"
+                'vllm:request_success_total{finished_reason="stop"} 9.0\n'
+                'vllm:request_success_total{finished_reason="length"} 11.0\n')
+        got = parse_vllm_metrics(text)
+        self.assertEqual(got["success"], 20)
+        self.assertIsInstance(got["success"], int)
+
+    def test_exact_name(self):
+        """指标名完全相等才算：带后缀的 created、bucket 都不要。"""
+        text = ("vllm:num_requests_running 1\n"
+                "vllm:prompt_tokens_cached_total 5\n"
+                "vllm:prompt_tokens_created 1.7e9\n")
+        got = parse_vllm_metrics(text)
+        self.assertEqual(got["prompt"], 0)
+        self.assertEqual(got["prompt_cached"], 5)
+
+    def test_no_label_lines(self):
+        """没有标签的行也认。"""
+        got = parse_vllm_metrics("vllm:num_requests_running 2\n")
+        self.assertEqual(got["running"], 2)
+
+    def test_missing_running_and_defaults(self):
+        """没有 vllm:num_requests_running 就没结果；只有它一行时其余键给 0 / 0.0 / None。"""
+        self.assertIsNone(parse_vllm_metrics("vllm:generation_tokens_total 5\n"))
+        got = parse_vllm_metrics("vllm:num_requests_running 0\n")
+        self.assertEqual(got["epoch"], None)
+        for key, kind in (("running", "i"), ("waiting", "i"), ("queries", "i"), ("hits", "i"),
+                          ("prompt", "i"), ("prompt_cached", "i"), ("ttft_count", "i"),
+                          ("generation", "i"), ("success", "i"), ("req_prompt_sum", "i"),
+                          ("req_generation_sum", "i"), ("req_computed_sum", "i"),
+                          ("drafted", "i"), ("accepted", "i"),
+                          ("ttft_sum", "f"), ("prefill_s", "f"), ("decode_s", "f")):
+            with self.subTest(key=key):
+                self.assertEqual(got[key], 0 if kind == "i" else 0.0)
+                self.assertIsInstance(got[key], int if kind == "i" else float)
+
+    def test_garbage_input(self):
+        """None、空字符串、读不懂的行（数值不是数字、只有一个词）：不抛异常。"""
+        self.assertIsNone(parse_vllm_metrics(None))
+        self.assertIsNone(parse_vllm_metrics(5))
+        self.assertIsNone(parse_vllm_metrics(""))
+        self.assertIsNone(parse_vllm_metrics("# 只有注释\n\n"))
+        text = ("坏行\n"
+                "vllm:num_requests_running abc\n\n"
+                "x\n"
+                "vllm:num_requests_running 1\n"
+                "vllm:generation_tokens_total abc\n"
+                "vllm:generation_tokens_total\n")
+        got = parse_vllm_metrics(text)
+        self.assertIsNotNone(got)
+        self.assertEqual(got["running"], 1)
+        self.assertEqual(got["generation"], 0)
+
+    def test_tensorfold_metrics(self):
+        """TensorFold 的 /metrics 文本认不出来：None。"""
+        self.assertIsNone(parse_vllm_metrics("tensorfold:requests_waiting 0\n"))
+        self.assertIsNone(parse_vllm_metrics(METRICS_TEXT))
+
+
 class TestParseMeminfo(unittest.TestCase):
     TEXT = "MemTotal:       127532380 kB\nMemFree: 1 kB\nMemAvailable:   30168172 kB\n"
 
@@ -247,6 +329,65 @@ class TestFetcher(unittest.TestCase):
                 self.assertIsNone(fetcher.model_name())
                 fetcher.close()
                 fetcher.close()
+
+
+class TestFetcherExtra(unittest.TestCase):
+    """Fetcher 新加的 get_text 和 model_info（本地假服务，跟 TestFetcher 同一套路）。"""
+
+    def setUp(self):
+        self.server = FakeServer()
+        self.addCleanup(self.server.stop)
+        self.fetcher = Fetcher(f"http://127.0.0.1:{self.server.port}")
+        self.addCleanup(self.fetcher.close)
+
+    def test_get_text(self):
+        """200 空正文是 ""，200 带正文是正文，404 和没人听的端口是 None。"""
+        self.server.responses["/empty"] = (200, b"")
+        self.assertEqual(self.fetcher.get_text("/empty"), "")
+        self.server.responses["/text"] = (200, "你好".encode("utf-8"))
+        self.assertEqual(self.fetcher.get_text("/text"), "你好")
+        self.assertEqual(self.fetcher.get_text("/health"), HEALTH_OK.decode("utf-8"))
+        self.assertIsNone(self.fetcher.get_text("/missing"))
+        self.server.stop()
+        self.assertIsNone(self.fetcher.get_text("/text"))
+        self.assertIsNone(Fetcher(f"http://127.0.0.1:{self.server.port}").get_text("/text"))
+
+    def test_model_info(self):
+        """有 max_model_len 就带上，不是正整数那一项就是 None；没有 id、空 data 都是 None。"""
+        def models(payload: bytes) -> None:
+            self.server.responses["/v1/models"] = (200, payload)
+
+        models(b'{"data": [{"id": "Qwen/Qwen3.8-Flash-Next", "max_model_len": 262144}]}')
+        self.assertEqual(self.fetcher.model_info(),
+                         {"id": "Qwen/Qwen3.8-Flash-Next", "max_model_len": 262144})
+        self.assertEqual(self.fetcher.model_name(), "Qwen/Qwen3.8-Flash-Next")
+        models(b'{"data": [{"id": "Qwen/Qwen3.8-Flash-Next"}]}')
+        self.assertEqual(self.fetcher.model_info(), {"id": "Qwen/Qwen3.8-Flash-Next", "max_model_len": None})
+        models(b'{"data": [{"id": "x", "max_model_len": "262144"}]}')
+        self.assertEqual(self.fetcher.model_info(), {"id": "x", "max_model_len": None})
+        models(b'{"data": [{"id": "x", "max_model_len": true}]}')
+        self.assertEqual(self.fetcher.model_info(), {"id": "x", "max_model_len": None})
+        models(b'{"data": [{"id": "x", "max_model_len": 0}]}')
+        self.assertEqual(self.fetcher.model_info(), {"id": "x", "max_model_len": None})
+        models(b'{"data": []}')
+        self.assertIsNone(self.fetcher.model_info())
+        self.assertIsNone(self.fetcher.model_name())
+        models(b'{"data": [{"max_model_len": 8}]}')  # 没有 id
+        self.assertIsNone(self.fetcher.model_info())
+        models(b'{"data": [{"id": "", "max_model_len": 8}]}')  # id 是空字符串
+        self.assertIsNone(self.fetcher.model_info())
+        models("不是 JSON".encode("utf-8"))
+        self.assertIsNone(self.fetcher.model_info())
+        self.server.responses["/v1/models"] = (500, b"")
+        self.assertIsNone(self.fetcher.model_info())
+
+    def test_model_info_server_down(self):
+        """服务关了以后 model_info / model_name 都是 None。"""
+        self.assertIsNotNone(self.fetcher.model_info())
+        self.fetcher.close()
+        self.server.stop()
+        self.assertIsNone(self.fetcher.model_info())
+        self.assertIsNone(self.fetcher.model_name())
 
 
 if __name__ == "__main__":
