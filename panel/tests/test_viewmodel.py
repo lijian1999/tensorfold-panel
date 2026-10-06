@@ -58,7 +58,7 @@ class TestOffline(FixtureCase):
         view = self.check("offline")
         self.assertEqual(view.state_name, "引擎离线")
         self.assertEqual(view.strip_left, "")
-        self.assertEqual(plain(view.strip_right), "上次模型 Qwen3.8-Flash-Next")
+        self.assertEqual(plain(view.strip_right), "上次模型 Qwen3.8-Flash-Next · TensorFold")
         self.assertEqual(marks(view.strip_right), [])
         self.assertTrue(view.lanes.offline)
         self.assertEqual(view.arc, "off")
@@ -76,7 +76,7 @@ class TestIdle(FixtureCase):
     def test_idle(self):
         view = self.check("idle")
         self.assertEqual(view.state_name, "空闲")
-        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next")
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next · TensorFold")
         self.assertEqual(plain(view.strip_right), "内存 94.2 / 121 GB")
         self.assertEqual(marks(view.strip_right), [("94.2", "strong")])
         self.assertEqual(view.cap, "今日费用")
@@ -476,7 +476,7 @@ class TestMissingData(FixtureCase):
         rnd = read("round-rest")["round"] | {"active": False}
         view = self.check("round-rest", round=rnd)
         self.assertEqual(view.cap, "今日费用")
-        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next")
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next · TensorFold")
 
     def test_empty_snapshots(self):
         for snapshot in ({}, {"state": "prefill"}, {"state": "decode"},
@@ -493,6 +493,97 @@ class TestSegs(FixtureCase):
         self.assertEqual(plain([Seg("内存 "), Seg("94.2", "strong"),
                                Seg(" / 121 GB")]), "内存 94.2 / 121 GB")
         self.assertEqual(marks([Seg("内存 ")]), [])
+
+
+class TestEngineLabel(FixtureCase):
+    """模型名只写最后一段，后面标出当前引擎。"""
+
+    def test_idle_vllm(self):
+        view = self.check("idle-vllm")
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next · vLLM")
+        self.assertEqual(plain(view.strip_right), "内存 94.2 / 121 GB")
+        self.assertEqual(view.lanes.max, 4)
+
+    def test_offline_vllm(self):
+        view = self.check("offline-vllm")
+        self.assertEqual(view.strip_left, "")
+        self.assertEqual(plain(view.strip_right),
+                         "上次模型 Qwen3.8-Flash-Next · vLLM")
+
+    def test_hook_missing_drops_engine(self):
+        view = self.check("idle-nohook")
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next")
+
+    def test_engine_unknown(self):
+        view = self.check("idle", engine=None)
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next")
+        view = self.check("offline", engine=None)
+        self.assertEqual(plain(view.strip_right), "上次模型 Qwen3.8-Flash-Next")
+
+    def test_vllm_never_warns_hook(self):
+        view = self.check("idle-vllm", hook="missing")
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next · vLLM")
+        self.assertEqual(plain(view.strip_right), "内存 94.2 / 121 GB")
+
+    def test_model_falls_back_to_config(self):
+        view = self.check("idle", model=None)
+        self.assertEqual(view.strip_left, "Qwen3.8-Flash-Next · TensorFold")
+
+
+class TestPrefillEstimated(FixtureCase):
+    """估算版预填充（vLLM）：标“近期平均”，进度按时间估算。"""
+
+    def test_prefill_est(self):
+        view = self.check("prefill-est")
+        self.assertEqual(view.state_name, "预填充中")
+        self.assertEqual(view.cap, "预填充速度")
+        self.assertEqual(view.unit, "tok/s")
+        self.assertTrue(view.pill)
+        self.assertEqual(view.pill_kind, "avg")
+        self.assertEqual(view.big_int, "2200")
+        self.assertEqual(view.big_size, "four")
+        self.assertEqual(view.arc, "prefill")
+        self.assertEqual(view.scale, "prefill")
+        self.assertAlmostEqual(view.arc_target, 0.7333, places=3)
+        self.assertEqual(view.bar.kind, "prog")
+        self.assertAlmostEqual(view.bar.frac, 0.3696, places=3)
+        self.assertEqual(plain(view.bar.text), "已算约 14.7K / 39.9K")
+        self.assertEqual(marks(view.bar.text), [("14.7K", "strong")])
+        self.assertEqual(plain(view.strip_right), "新算 39.9K tok")
+        self.assertEqual(
+            cards(view),
+            [("缓存命中", "0", "%", "0 / 39.9K"),
+             ("已等待", "6.7", "s", "剩余约 12 s"),
+             ("内存", "94.4", "GB", "共 121 GB")],
+        )
+        self.assertEqual(view.lanes.max, 4)
+        self.assertEqual(view.lanes.prefilling, 1)
+
+    def test_prefill_est_inside_a_round(self):
+        with open(FIXTURES_DIR / "prefill-miss.json", encoding="utf-8") as f:
+            miss = json.load(f)
+        view = self.check("prefill-est", round=miss["round"])
+        self.assertEqual(plain(view.strip_right),
+                         "已用时 6.7 s · 缓存命中 0% · 剩余约 12 s")
+        self.assertEqual([c.label for c in view.cards],
+                         ["本轮请求", "累计输出", "本轮平均"])
+
+    def test_prefill_est_almost_done(self):
+        base = read("prefill-est")["prefill"]
+        view = self.check("prefill-est",
+                          prefill=dict(base, elapsed_s=30.0,
+                                       filled_tokens=39485, remaining_s=0.0))
+        self.assertEqual(cards(view)[1], ("已等待", "30.0", "s", "剩余约 1 s"))
+        self.assertAlmostEqual(view.bar.frac, 0.99, places=2)
+
+    def test_tensorfold_prefill_unchanged(self):
+        view = self.check("prefill")
+        self.assertFalse(view.pill)
+        self.assertEqual(view.pill_kind, "exact")
+        self.assertEqual(plain(view.bar.text), "已算 53.2K / 61.2K")
+        view = self.check("done")
+        self.assertTrue(view.pill)
+        self.assertEqual(view.pill_kind, "exact")
 
 
 if __name__ == "__main__":

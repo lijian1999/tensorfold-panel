@@ -47,6 +47,7 @@ class View:
     cap: str = ""                # 仪表盘标题，如“解码速度”
     unit: str = ""               # 标题后的单位，如“tok/s”
     pill: bool = False           # “精确”标记
+    pill_kind: str = "exact"     # pill 为 True 时画哪一种标记："exact" 实心的“精确” | "avg" 琥珀色描边的“近期平均”
     big_int: str = ""            # 主数字的整数部分（含货币符号）
     big_dec: str = ""            # 主数字的小数部分（含小数点），可为空
     big_whole: bool = False      # True：小数部分和整数部分同字号
@@ -79,6 +80,7 @@ class View:
             cap=d.get("cap", ""),
             unit=d.get("unit", ""),
             pill=d.get("pill", False),
+            pill_kind=d.get("pill_kind", "exact"),
             big_int=d.get("big_int", ""),
             big_dec=d.get("big_dec", ""),
             big_whole=d.get("big_whole", False),

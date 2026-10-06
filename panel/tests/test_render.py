@@ -209,6 +209,20 @@ class DrawPixels(unittest.TestCase):
                             f"{row_brightest(bright, y, 698, 912)}")
 
 
+    def test_avg_pill(self):
+        """“近期平均”是琥珀色的：估算版预填充的标题行里有，TensorFold 的预填充里没有。"""
+        def has_amber(s):
+            """y=256 这一行里有没有琥珀色像素（标题后面那个标记）。"""
+            return any(all(abs(a - b) <= 12 for a, b in zip(pixel(s, x, 256), AMBER))
+                       for x in range(380, 530))
+        est = surface_of("prefill-est")
+        self.assertTrue(has_amber(est),
+                        "prefill-est 里没有琥珀色的“近期平均”")
+        std = surface_of("prefill")
+        self.assertFalse(has_amber(std),
+                         "prefill（TensorFold）里出现了琥珀色像素")
+
+
 class DrawRobust(unittest.TestCase):
     """三、draw 对任何 View 都不能抛异常。"""
 

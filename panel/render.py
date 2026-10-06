@@ -336,10 +336,11 @@ def _ticks(cr, view, frame):
 
 
 def _cap_line(cr, view):
-    """标题行：标题（· 单位），后面可能跟一个“精确”标记，整体水平居中。"""
+    """标题行：标题（· 单位），后面可能跟一个“精确”或“近期平均”标记，整体水平居中。"""
     text = f"{view.cap} · {view.unit}" if view.unit else view.cap
+    pill_text = "近期平均" if view.pill_kind == "avg" else "精确"
     w_cap = _width(cr, text, 13, False) if text else 0
-    w_pill = _width(cr, "精确", 12, True, 0.04) + 14 if view.pill else 0
+    w_pill = _width(cr, pill_text, 12, True, 0.04) + 14 if view.pill else 0
     gap = 6 if (text and view.pill) else 0
     x = 166 - (w_cap + gap + w_pill) / 2
     if text:
@@ -353,12 +354,19 @@ def _cap_line(cr, view):
         cr.set_line_width(1)
         cr.set_source_rgb(*FAINT)
         cr.stroke()
-        _text(cr, "精确", 12, px + 7, 128, MUTED, True, ls=0.04)
+        _text(cr, pill_text, 12, px + 7, 128, MUTED, True, ls=0.04)
+    elif view.pill_kind == "avg":
+        # “近期平均”：不填底色，琥珀色描边 + 琥珀色文字，和实心的“精确”区分开
+        _rrect(cr, px + 0.5, 119.5, w_pill - 1, 17, 8.5)
+        cr.set_line_width(1)
+        cr.set_source_rgba(*AMBER, 0.5)
+        cr.stroke()
+        _text(cr, pill_text, 12, px + 7, 128, AMBER, True, ls=0.04)
     else:
         _rrect(cr, px, 119, w_pill, 18, 9)
         cr.set_source_rgba(*PILL_BG, PILL_BG_ALPHA)
         cr.fill()
-        _text(cr, "精确", 12, px + 7, 128, PILL_TEXT, True, ls=0.04)
+        _text(cr, pill_text, 12, px + 7, 128, PILL_TEXT, True, ls=0.04)
 
 
 def _big(cr, view, frame):
@@ -411,7 +419,7 @@ def _center(cr, view, frame):
     """仪表盘中间那块。"""
     if view.state == "offline":
         _text(cr, "引擎离线", 28, 166, 166, TEXT_2, True, "center")
-        _text(cr, "等待 TensorFold 响应…", 13, 166, 199, MUTED, False, "center")
+        _text(cr, "等待引擎响应…", 13, 166, 199, MUTED, False, "center")
         return
     if view.cap or view.unit:
         _cap_line(cr, view)

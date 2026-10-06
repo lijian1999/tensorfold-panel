@@ -117,6 +117,25 @@ class ViewModel:
             waiting=_num(lanes.get("waiting"), 0),
         )
 
+    def _model_name(self, snap: dict) -> str:
+        """显示用的模型名：只取最后一个 '/' 后面的那段。"""
+        model = snap.get("model")
+        if not isinstance(model, str) or not model:
+            model = self.config.model_name
+        if not isinstance(model, str):
+            return ""
+        last = model.rsplit("/", 1)[-1]
+        return last or model
+
+    def _engine_name(self, snap: dict) -> str | None:
+        """引擎名：认不出的（包括没有这个键）都是 None。"""
+        engine = snap.get("engine")
+        if engine == "tensorfold":
+            return "TensorFold"
+        if engine == "vllm":
+            return "vLLM"
+        return None
+
     def _memory_text(self, snap: dict) -> list[Seg]:
         """状态条右侧的“内存 x.x / 121 GB”。"""
         used, total = self._memory(snap)
@@ -213,11 +232,15 @@ class ViewModel:
         if not isinstance(last, dict):
             last = {}
 
-        view.strip_left = snap.get("model") or self.config.model_name
-        if snap.get("hook") == "missing":
+        model = self._model_name(snap)
+        engine = self._engine_name(snap)
+        if snap.get("hook") == "missing" and snap.get("engine") != "vllm":
+            # 写了“外挂未生效”就不再重复写引擎名
+            view.strip_left = model
             view.strip_right = _join([Seg("外挂未生效", "warn"), Seg(" · ")]
                                      + self._memory_text(snap))
         else:
+            view.strip_left = f"{model} · {engine}" if engine else model
             view.strip_right = _join(self._memory_text(snap))
 
         currency = self.config.currency
@@ -251,9 +274,11 @@ class ViewModel:
 
     def _offline(self, view: View, snap: dict, mem_card: Card) -> None:
         """引擎离线。"""
-        model = snap.get("model") or self.config.model_name
+        model = self._model_name(snap)
+        engine = self._engine_name(snap)
         view.state_name = "引擎离线"
-        view.strip_right = [Seg(f"上次模型 {model}")]
+        view.strip_right = _join([Seg(f"上次模型 {model}")]
+                                 + ([Seg(f" · {engine}")] if engine else []))
         view.lanes.offline = True
         view.arc = "off"
         today = snap.get("today")
@@ -315,6 +340,11 @@ class ViewModel:
         new_tokens = prompt - cached
         hit = fmt.pct(cached, prompt)
         tps = prefill.get("tps")
+        estimated = bool(prefill.get("estimated"))
+        if estimated:
+            # vLLM 读不到真实进度：主数字是近期平均速度，进度只能按时间估
+            view.pill = True
+            view.pill_kind = "avg"
         view.cap = "预填充速度"
         view.unit = "tok/s"
         view.big_int = str(fmt.js_round(tps)) if tps else "—"
@@ -327,12 +357,17 @@ class ViewModel:
             "prog",
             (filled / prompt) if prompt else 0,
             "normal",
-            _join([Seg("已算 "), Seg(fmt.tok_fmt(filled), "strong"),
+            _join([Seg("已算约 " if estimated else "已算 "),
+                   Seg(fmt.tok_fmt(filled), "strong"),
                    Seg(f" / {fmt.tok_fmt(prompt)}")]),
         )
 
         el_txt = f"{el:.1f}" if el < 100 else str(math.floor(el))
-        rem = self._remaining(prefill, prompt, filled, el, tps)
+        if estimated:
+            # 剩余时间不看速度，固定按预计时间减去已用时
+            rem = max(1, math.ceil(_num(prefill.get("est_s"), 0) - el))
+        else:
+            rem = self._remaining(prefill, prompt, filled, el, tps)
         if rm:
             view.cards = self._round_cards(snap)
             if prefill.get("cache_miss"):
