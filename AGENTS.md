@@ -18,7 +18,7 @@
 
 - 你运行在 MacBook Pro 上，代码仓库也在这里。
 - 程序最终运行在 DGX Spark 上（Ubuntu 24.04，aarch64）。用 `ssh spark` 登录，已配置免密。
-- 你自己就是 Spark 上 8888 端口那个模型（容器 `qwen38-flash-next-tf`）。
+- 你自己就是 Spark 上正在跑的那个模型：vLLM，8000 端口，容器 `qwen38-flash-next`。Spark 上的推理引擎会换（TensorFold 在 8888 端口，vLLM 在 8888 或 8000 端口），以 `docker ps` 看到的为准。
 
 ## 目录
 
@@ -43,10 +43,10 @@
 
 ## 绝对不能做的事
 
-- 不要启动、停止或重启 TensorFold 容器，也不要执行部署仓库的 `start.sh`、`stop.sh`。需要重启模型时在结果里说明，由编排者处理。
+- 不要启动、停止或重启任何推理引擎的容器（TensorFold、vLLM），也不要执行各部署目录里的启动、停止脚本。需要重启模型时在结果里说明，由编排者处理。
 - 不要修改容器里的任何文件，不要用 `docker exec` 改东西（只读查看可以）。
-- 不要修改部署仓库 `~/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/` 里的任何文件，包括往 `patches/` 里放文件。
-- 不要为了测试向 8888 端口发推理请求。读 `/health` 和 `/metrics` 可以。
+- 不要修改各部署目录（`~/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/`、`~/Qwen3.8-Flash-Next-Single-DGX-Spark/`、`~/models/qwen38-flash-next-recipe/`）里的任何文件，包括往 `patches/` 里放文件。
+- 不要为了测试向推理引擎（8888、8000 端口）发推理请求。读 `/health`、`/metrics`、`/v1/models` 可以。
 - 不要修改 Spark 的系统设置（显示、息屏、登录、时区等）。
 
 ## 在 Spark 上运行

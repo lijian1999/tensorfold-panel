@@ -8,7 +8,8 @@
   扩展坞 3.5 英寸副屏 · 本地大模型实时性能仪表盘 · 可点击原型（第 2 版 · DGX Spark，仅设计稿，非正式实现）
   画布：480×320 CSS px，副屏上放大 2 倍 = 960×640
   ?kiosk=1 只显示屏幕本身（纯黑背景、自动循环）；再加 &demo=<名字> 停在某个画面：
-  offline / idle / prefill / prefill-fresh / prefill-miss / prefill-nohook / decode / decode-multi / queue / done / round-rest
+  offline / idle / prefill / prefill-fresh / prefill-miss / prefill-nohook / prefill-est / decode / decode-multi / queue / done / round-rest
+  再加 &engine=vllm 按 vLLM 引擎演示（默认 TensorFold；prefill-est 固定是 vLLM，其余几个预填充画面固定是 TensorFold）
 -->
 <style>
   /* ============ 页面（屏幕之外）============ */
@@ -227,6 +228,8 @@
     letter-spacing: .04em;
   }
   .pill.on { display: inline-block; }
+  /* “近期平均”：数字不是引擎实报的，用琥珀色描边，和实心的“精确”区分开 */
+  .pill.est { background: transparent; color: var(--amber); box-shadow: 0 0 0 1px rgba(240, 180, 76, .5) inset; }
   .screen[data-muted="1"] .pill { background: transparent; color: var(--muted); box-shadow: 0 0 0 1px var(--faint) inset; }
   .big {
     top: 97px; height: 96px;
@@ -302,7 +305,7 @@
   <aside class="panel" aria-label="控制面板">
     <div>
       <h1>副屏仪表盘 · 原型（第 2 版）</h1>
-      <p class="sub">TensorFold 0.6.1 · Qwen3.8 Flash Next · DGX Spark 121 GB · 最多 5 条流<br>画布 480×320（副屏上放大 2 倍 = 960×640）</p>
+      <p class="sub">TensorFold 或 vLLM（自动识别）· Qwen3.8 Flash Next · DGX Spark 121 GB<br>画布 480×320（副屏上放大 2 倍 = 960×640）</p>
     </div>
 
     <div class="group">
@@ -326,8 +329,10 @@
         <button type="button" data-demo="prefill-fresh">单个请求 · 从头算 2.5 万 token</button>
         <button type="button" data-demo="prefill-miss">编程代理一轮 · 缓存未命中</button>
         <button type="button" data-demo="prefill-nohook">外挂失效时的样子（降级）</button>
+        <button type="button" data-demo="prefill-est">vLLM · 从头算 4 万 token（估算进度）</button>
       </div>
       <p class="hint">预计超过 3 秒的预填充一开始就切到这个画面；3 秒内的短预填充只有状态条和流指示点变化。引擎按 2048 个 token 一块来算，所以速度大约每 0.9 秒跳一次。</p>
+      <p class="hint">vLLM 读不到预填充进度：提示长度和缓存命中是准数，主数字是最近几次请求的平均速度（标“近期平均”，本次预填充期间不变），进度条按时间匀速前进（“已算约”）。新请求要等引擎算完第一步才看得到，这个画面会晚 2–5 秒出现，“已等待”从估计的起点算。</p>
     </div>
 
     <div class="group">
@@ -350,6 +355,10 @@
 
     <div class="group">
       <div class="group-title">显示</div>
+      <select id="engineSel" aria-label="引擎">
+        <option value="tensorfold">引擎：TensorFold（外挂实报进度，最多 5 条流）</option>
+        <option value="vllm">引擎：vLLM（进度按时间估算，流指示点按需增加）</option>
+      </select>
       <label class="check"><input type="checkbox" id="hookChk"><span>外挂失效<small>预填充画面退回“已用时”，没有缓存命中和速度</small></span></label>
       <label class="check"><input type="checkbox" id="ctxLongChk"><span>模拟长会话<small>上下文 +200K，看接近上限时的琥珀色 / 红色</small></span></label>
     </div>
@@ -369,7 +378,7 @@
       <div class="kiosk-links">
         <a href="?kiosk=1" target="_blank" rel="noopener">打开 Kiosk（自动循环）</a>
       </div>
-      <p class="hint">只显示屏幕本身。地址后再加 <code>&amp;demo=名字</code> 可以停在某个画面，名字就是上面按钮对应的：offline、idle、decode、decode-multi、queue、done、round-rest、prefill、prefill-fresh、prefill-miss、prefill-nohook。</p>
+      <p class="hint">只显示屏幕本身。地址后再加 <code>&amp;demo=名字</code> 可以停在某个画面，名字就是上面按钮对应的：offline、idle、decode、decode-multi、queue、done、round-rest、prefill、prefill-fresh、prefill-miss、prefill-nohook、prefill-est。再加 <code>&amp;engine=vllm</code> 按 vLLM 演示。</p>
     </div>
 
     <details>
@@ -385,6 +394,7 @@
         <li><b>空闲 = 今日统计（新）</b>：今日费用（按 API 价格折算：输入 $0.15、缓存命中 $0.016、输出 $0.47，每百万 token）、今日输入、输出、请求数。按太平洋时间 0 点清零。一轮中间的空隙不切到今日统计，一轮结束后才切。</li>
         <li><b>上下文条</b>：显示占用最大的那条流。占到 80% 变琥珀色、95% 变红色。</li>
         <li><b>外挂失效</b>：预填充画面退回“已用时”，其他不受影响；今日统计的状态条会标“外挂未生效”。</li>
+        <li><b>两种引擎（新）</b>：空闲和离线时模型名后面标出当前引擎（TensorFold 标了“外挂未生效”时不再重复写引擎名）。vLLM 没有外挂：预填充画面的速度和进度是估算的；流指示点从 4 个起，同时在跑的流多了再加；长预填充期间其他流几乎不出字，仪表盘会如实掉到个位数。</li>
         <li><b>没有模拟的</b>：空闲 30 分钟后画面调暗到 40%。</li>
       </ul>
     </details>
@@ -429,7 +439,7 @@
           <div class="ctx"><div class="ctx-bar"><div class="ctx-fill"></div></div><div class="ctx-text"></div></div>
           <div class="offline-msg">
             <div class="t1">引擎离线</div>
-            <div class="t2">等待 TensorFold 响应…</div>
+            <div class="t2">等待引擎响应…</div>
           </div>
         </div>
       </div>
@@ -456,7 +466,8 @@
   const MEM_BASE = 94.2;       // 模型加载后的已用内存
   const MEM_LANE = 4.47;       // 一条流占满上下文时的缓存（GB）
   const CTX_MAX = 262144;      // --context 262144
-  const LANES = 5;             // --parallel 5
+  const LANES = 5;             // TensorFold：--parallel 5
+  const LANES_DRAWN = 12;      // 流指示点最多画这么多个
   const WINDOW = 2.5;          // 解码速度平滑窗口（秒）
   const EASE_TAU = 0.4;        // 圆弧 / 数字缓动时间常数（秒）
   const DONE_HOLD = 4;         // 完成画面停留（秒）
@@ -471,6 +482,14 @@
   const CONC = [1, 1, 0.72, 0.56, 0.47, 0.40];
   let roundGap = 8;            // 一轮的间隔（秒）；正式是 60，演示加速时按 8
 
+  // 两种引擎。vLLM 的数字是 2026-10-06 实测的那一套（并发上限 16，预填充约 2,200 tok/s，单流解码约 45 tok/s）
+  const ENGINE = {
+    tensorfold: { name: 'TensorFold', cap: LANES, pf: PF_SPEED, pfAvg: PF_EST, dec: 1 },
+    vllm:       { name: 'vLLM',       cap: 16,    pf: 2200,     pfAvg: 2200,   dec: 0.72 },
+  };
+  const V_FIRST_STEP = 8192;   // vLLM：第一步最多算这么多 token，算完之前面板看不到这个请求
+  const V_LAG_TYP = 2.0;       // vLLM：起点回推的上限（典型延迟，秒）
+
   const SCEN = {
     prose:   { prompt: 58,    cached: 0,     out: 570,   final: 63.6, accept: 70 },
     code:    { prompt: 96,    cached: 0,     out: 600,   final: 97.2, accept: 81 },
@@ -482,6 +501,8 @@
     fresh:   { prompt: 24615, cached: 0,     out: 420,   final: 59.7, accept: 68 },
     // 编程代理一轮里缓存突然未命中：4 万 token 全部重算
     miss:    { prompt: 41230, cached: 0,     out: 380,   final: 57.1, accept: 65 },
+    // vLLM 实测：39,884 token 从头算，18.2 秒
+    vfresh:  { prompt: 39884, cached: 0,     out: 420,   final: 62.5, accept: 26 },
   };
   const ROTATION = ['prose', 'agent', 'multi', 'hit', 'code', 'queue', 'fresh'];
 
@@ -553,7 +574,7 @@
     const lanes = node.querySelector('.lanes');
     const queue = lanes.querySelector('.queue');
     const laneEls = [];
-    for (let i = 0; i < LANES; i++) {
+    for (let i = 0; i < LANES_DRAWN; i++) {
       const el = document.createElement('i');
       el.className = 'lane';
       lanes.insertBefore(el, queue);
@@ -595,6 +616,9 @@
     hold: null,       // 手动停住：'done' / 'round-rest'
     manual: false, demo: null,
     hook: true,       // 容器内外挂是否生效
+    engine: qs.get('engine') === 'vllm' ? 'vllm' : 'tensorfold',
+    hidden: [],       // vLLM：已经发出、引擎还没算完第一步的请求（面板看不到）
+    lanesPeak: 0,     // vLLM：这次引擎启动以来同时在跑的最大条数
     last: { final: 63.6, out: 570, ttft: 0.07, prompt: 58, cached: 0, accept: 70, ctx: 628 },
     lastDoneAt: -1e9,
     prevState: 'idle',
@@ -625,16 +649,35 @@
   }
 
   function launch(sc, t, opts = {}) {
-    roundBegin(t);
     const s = {
-      sc, t0: t, phase: 'wait', prompt: sc.prompt, cached: sc.cached,
+      sc, t0: t, start: t, jit: 1, phase: 'wait', prompt: sc.prompt, cached: sc.cached,
       prog: 0, filled: sc.cached, lastFilled: sc.cached, stepAt: 0, pfSpeed: null,
       out: sc.skip || 0, emitted: 0, decodeStart: 0, ttft: 0,
       nextRound: 0, regimeUntil: 0, mult: 1,
       endless: !!opts.endless,
     };
-    if (S.streams.length >= LANES) S.waiting.push(s); else admit(s, t);
+    if (S.engine === 'vllm') {
+      // vLLM：新请求要等分词和第一步算完才出现在指标里；引擎本来就在跑别的请求时几乎立刻出现
+      const need = sc.prompt - sc.cached;
+      s.jit = rand(0.88, 1.12);                       // 这次的实际速度和“近期平均”总有出入
+      s.tok = 0.12 + sc.prompt / 40000;               // 分词
+      // “停在某个画面”时不等这几秒，直接从面板第一次看到它的那一刻开始演示
+      s.lag = opts.endless ? 0 : S.streams.length ? 0.15 : s.tok + Math.min(need, V_FIRST_STEP) / (ENGINE.vllm.pf * s.jit);
+      S.hidden.push(s);
+      return s;
+    }
+    roundBegin(t);
+    if (S.streams.length >= ENGINE[S.engine].cap) S.waiting.push(s); else admit(s, t);
     return s;
+  }
+
+  // vLLM：请求第一次出现在指标里。起点往回推（新算 ÷ 平均速度，不超过典型延迟）；引擎不空闲时不回推
+  function reveal(s, t) {
+    const need = s.prompt - s.cached;
+    s.start = S.streams.length ? t : t - Math.min(need / ENGINE.vllm.pfAvg, V_LAG_TYP);
+    s.prog = Math.min(need * 0.98, ENGINE.vllm.pf * s.jit * Math.max(0, t - s.t0 - s.tok));
+    roundBegin(t);
+    if (S.streams.length >= ENGINE.vllm.cap) S.waiting.push(s); else admit(s, t);
   }
 
   function admit(s, t) {
@@ -660,7 +703,16 @@
       s.mult = x < 0.35 ? 0.45 : x < 0.7 ? 1.0 : 1.75;
       s.regimeUntil = t + rand(0.5, 1.4);
     }
-    const target = s.sc.final * CONC[Math.min(nDec, 5)];
+    if (S.engine === 'vllm' && S.streams.some(x => x.phase === 'prefill')) {
+      // vLLM 实测：别的请求在预填充时，一步约 1 秒，解码中的流每步只出一两个 token
+      let k = Math.random() < 0.5 ? 1 : 2;
+      if (!s.endless) k = Math.min(k, s.sc.out - (s.sc.skip || 0) - s.emitted);
+      s.emitted += k; s.out += k;
+      S.events.push([t, k]);
+      s.nextRound = t + rand(0.8, 1.2);
+      return;
+    }
+    const target = s.sc.final * CONC[Math.min(nDec, 5)] * ENGINE[S.engine].dec;
     const elapsed = t - s.decodeStart;
     let fb = 1;
     if (elapsed > 0.8 && s.emitted > 0) fb = clamp((target * elapsed) / s.emitted, 0.7, 1.5);
@@ -711,7 +763,7 @@
 
   // ---------- 发起模拟 ----------
   function resetSim() {
-    S.streams = []; S.waiting = []; S.sched = []; S.events = [];
+    S.streams = []; S.waiting = []; S.sched = []; S.events = []; S.hidden = [];
     S.agent = null; S.multi = null; S.hold = null; S.offline = false;
     S.round = null; S.lastDoneAt = -1e9;
   }
@@ -765,6 +817,9 @@
     const loopChk = document.getElementById('loopChk');
     if (loopChk) loopChk.checked = false;
     setHook(name !== 'prefill-nohook');
+    // 估算版预填充只有 vLLM 有；其余几个预填充画面是 TensorFold 的；别的画面沿用当前选的引擎
+    if (name === 'prefill-est') setEngine('vllm');
+    else if (name.startsWith('prefill')) setEngine('tensorfold');
     const t = now();
     const endless = { endless: true };
     switch (name) {
@@ -773,6 +828,7 @@
       case 'prefill': launch(SCEN.hit, t, endless); break;
       case 'prefill-fresh':
       case 'prefill-nohook': launch(SCEN.fresh, t, endless); break;
+      case 'prefill-est': launch(SCEN.vfresh, t, endless); break;
       case 'prefill-miss':
         // 编程代理已跑了 5 次，上一次提示 40.1K；这一次本该命中 4 万，结果全部重算
         S.round = { t0: t - 95, done: 5, out: 1830, tokSum: 1830, decS: 1830 / 61.8, wall: 29.6, overlapped: false, lastEnd: t - 0.4, lastPrompt: 40120 };
@@ -835,6 +891,7 @@
   // ---------- 视图模型 ----------
   function view(t, st) {
     const L = S.last, R = S.round;
+    const ENG = ENGINE[S.engine];
     const dec = S.streams.filter(s => s.phase === 'decode');
     const pre = S.streams.filter(s => s.phase === 'prefill');
     const nWait = S.waiting.length;
@@ -854,8 +911,9 @@
 
     const V = {
       state: st, rm: RM && active, stateName: '', stripLeft: '', stripRight: '',
-      lanes: { dec: dec.length, pre: pre.length, wait: nWait, off: false },
-      cap: '', unit: 'tok/s', pill: false, bigInt: '', bigDec: '', whole: false, bigClass: '',
+      lanes: { dec: dec.length, pre: pre.length, wait: nWait, off: false,
+               max: S.engine === 'vllm' ? Math.min(LANES_DRAWN, Math.max(4, S.lanesPeak)) : LANES },
+      cap: '', unit: 'tok/s', pill: false, pillText: '精确', bigInt: '', bigDec: '', whole: false, bigClass: '',
       arc: 'rest', scale: 'decode', ghostF: null, rest: null, pfSpeed: null,
       muted: false, ctx: null, cards: [],
     };
@@ -888,8 +946,10 @@
     // 今日统计（空闲画面）
     const today = () => {
       const d = S.today;
-      V.stripLeft = MODEL;
-      V.stripRight = (S.hook ? '' : '<span class="warn">外挂未生效</span> · ') + memTxt;
+      // 模型名后面标出引擎；标了“外挂未生效”就不再写引擎名（只有 TensorFold 有外挂，位置也不够）
+      const hookWarn = S.engine === 'tensorfold' && !S.hook;
+      V.stripLeft = hookWarn ? MODEL : `${MODEL} · ${ENG.name}`;
+      V.stripRight = (hookWarn ? '<span class="warn">外挂未生效</span> · ' : '') + memTxt;
       V.cap = '今日费用'; V.unit = '美元';
       const s = costFmt(costOf(d));
       const i = s.indexOf('.');
@@ -908,7 +968,7 @@
     switch (st) {
       case 'offline': {
         V.stateName = '引擎离线';
-        V.stripRight = `上次模型 ${MODEL}`;
+        V.stripRight = `上次模型 ${MODEL} · ${ENG.name}`;
         V.lanes.off = true;
         V.arc = 'off';
         const secs = Math.floor(t - S.offlineSince);
@@ -927,10 +987,13 @@
         break;
       }
       case 'prefill': {
-        const el = t - Math.min(...pre.map(s => s.t0));
-        const P = sum(pre, s => s.prompt), C = sum(pre, s => s.cached), F = sum(pre, s => s.filled), N = P - C;
+        const el = t - Math.min(...pre.map(s => s.start));
+        const P = sum(pre, s => s.prompt), C = sum(pre, s => s.cached), N = P - C;
         const hit = P ? Math.round(C / P * 100) : 0;
-        const est = N / PF_EST;
+        const est = N / ENG.pfAvg;
+        // vLLM 读不到进度：已算 = 缓存命中 + 新算 × 已用时 ÷ 预计时间，最多到 99%
+        const estMode = S.engine === 'vllm';
+        const F = estMode ? C + N * Math.min(0.99, est > 0 ? el / est : 1) : sum(pre, s => s.filled);
         // 缓存未命中：本轮没出现过并发，上一个请求的提示够长，这次提示和它差不多长，却连它的一半都没命中，且新算的不少
         const prev = RM && R.done >= 1 && !R.overlapped ? R.lastPrompt : null;
         const miss = S.hook && prev != null && prev >= MISS_MIN && P >= prev * 0.5 && C < prev * 0.5 && N >= MISS_MIN;
@@ -960,14 +1023,16 @@
           break;
         }
         // 实时预填充速度：各条流最近算完的一块的速度之和；第一块算完之前没有
+        // vLLM：主数字是最近几次请求的平均预填充速度，本次预填充期间不变，标“近期平均”
         const speeds = pre.filter(s => s.pfSpeed !== null);
-        const sp = speeds.length ? sum(speeds, s => s.pfSpeed) : null;
-        const rem = Math.max(1, Math.ceil(sp ? (P - F) / sp : est - el));
+        const sp = estMode ? ENG.pfAvg : speeds.length ? sum(speeds, s => s.pfSpeed) : null;
+        const rem = Math.max(1, Math.ceil(sp && !estMode ? (P - F) / sp : est - el));
         V.cap = '预填充速度'; V.unit = 'tok/s';
+        if (estMode) { V.pill = true; V.pillText = '近期平均'; }
         V.arc = 'prefill'; V.scale = 'prefill'; V.pfSpeed = sp;
         V.bigInt = sp !== null ? String(Math.round(sp)) : '—';
         V.bigClass = 'four';
-        V.ctx = { kind: 'prog', frac: P ? F / P : 0, html: `已算 <b>${tokFmt(F)}</b> / ${tokFmt(P)}` };
+        V.ctx = { kind: 'prog', frac: P ? F / P : 0, html: `${estMode ? '已算约' : '已算'} <b>${tokFmt(F)}</b> / ${tokFmt(P)}` };
         const hitTxt = miss ? '<span class="warn">缓存未命中</span>' : `缓存命中 <b>${hit}%</b>`;
         if (RM) {
           V.cards = roundCards();
@@ -1066,7 +1131,7 @@
       stats: V.cards.map(c => c.l).join('|'),
       strip: V.stateName,
     };
-    const laneKey = V.lanes.off ? 'off' : `${V.lanes.dec},${V.lanes.pre},${V.lanes.wait}`;
+    const laneKey = V.lanes.off ? 'off' : `${V.lanes.dec},${V.lanes.pre},${V.lanes.wait},${V.lanes.max}`;
     for (const scr of screens) {
       const root = scr.root;
       if (root.dataset.state !== V.state) root.dataset.state = V.state;
@@ -1082,6 +1147,7 @@
         scr.cache.lanes = laneKey;
         scr.lanes.classList.toggle('off', V.lanes.off);
         scr.laneEls.forEach((el, i) => {
+          el.style.display = (i < V.lanes.max && !(V.lanes.off && i > 0)) ? '' : 'none';
           el.classList.toggle('dec', !V.lanes.off && i < V.lanes.dec);
           el.classList.toggle('pre', !V.lanes.off && i >= V.lanes.dec && i < V.lanes.dec + V.lanes.pre);
         });
@@ -1095,6 +1161,11 @@
       setText(scr, 'bigInt', V.bigInt);
       setText(scr, 'bigDec', V.bigDec);
       if (scr.cache.pill !== V.pill) { scr.cache.pill = V.pill; scr.pill.classList.toggle('on', V.pill); }
+      if (scr.cache.pillText !== V.pillText) {
+        scr.cache.pillText = V.pillText;
+        scr.pill.textContent = V.pillText;
+        scr.pill.classList.toggle('est', V.pillText !== '精确');
+      }
       if (scr.cache.whole !== V.whole) { scr.cache.whole = V.whole; scr.big.classList.toggle('whole', V.whole); }
       if (scr.cache.bigClass !== V.bigClass) {
         scr.cache.bigClass = V.bigClass;
@@ -1162,18 +1233,29 @@
       if (t >= S.sched[i].at) { const { sc } = S.sched.splice(i, 1)[0]; launch(sc, t); }
     }
 
+    // vLLM：引擎算完第一步，请求才出现在面板能读到的指标里
+    if (S.hidden.length) {
+      const due = S.hidden.filter(s => t >= s.t0 + s.lag);
+      if (due.length) {
+        S.hidden = S.hidden.filter(s => !due.includes(s));
+        for (const s of due) reveal(s, t);
+      }
+    }
+    S.lanesPeak = Math.max(S.lanesPeak, S.streams.length);
+
     // 预填充：引擎把时间分给正在预填充的流；有流在解码时预填充变慢。进度每算完一块（2048 token）才更新
     const pre = S.streams.filter(s => s.phase === 'prefill');
     const nDec = S.streams.length - pre.length;
     if (pre.length) {
-      const speed = PF_SPEED * (nDec ? PF_SHARED : 1) / pre.length;
+      const speed = ENGINE[S.engine].pf * (nDec ? PF_SHARED : 1) / pre.length;
       for (const s of pre) {
         if (t < s.admitAt + 0.06) continue;
         const need = s.prompt - s.cached;
-        s.prog += speed * dt;
+        s.prog += speed * s.jit * dt;
         if (s.prog >= need) {
           if (!s.endless || need < CHUNK * 4) { beginDecode(s, t); continue; }
           s.prog = 0; s.lastFilled = s.cached; s.stepAt = t;       // 手动停住：从头再来
+          if (S.engine === 'vllm') s.start = t;                    // 估算的进度按时间走，起点也要跟着重来
         }
         const filled = s.cached + Math.min(need, Math.floor(s.prog / CHUNK) * CHUNK);
         if (filled > s.lastFilled) {
@@ -1223,7 +1305,7 @@
     }
 
     // 模拟编程代理：每次完成后隔 0.3–4 秒发下一次（第 6 次后隔 5 秒，能看到一轮里的空隙）
-    const busy = S.streams.length + S.waiting.length > 0;
+    const busy = S.streams.length + S.waiting.length + S.hidden.length > 0;
     if (S.agent && !S.manual && !busy) {
       const a = S.agent;
       if (a.nextAt === 0) a.nextAt = t + (a.i === 6 ? 5 : rand(0.3, 4));
@@ -1251,7 +1333,7 @@
     if (Math.abs(S.frac - targetF) < 0.0005) S.frac = targetF;
 
     // 连续循环：回到今日统计后隔几秒发起下一次
-    if (st === 'idle' && !V.rm && S.autoLoop && !S.manual && !S.agent && !S.multi && !S.sched.length) {
+    if (st === 'idle' && !V.rm && S.autoLoop && !S.manual && !S.agent && !S.multi && !S.sched.length && !S.hidden.length) {
       if (t >= S.loopNextAt) startRequest(KIOSK ? 'auto' : document.getElementById('scenario').value);
     } else {
       S.loopNextAt = t + rand(4, 6);
@@ -1280,6 +1362,12 @@
     const chk = document.getElementById('hookChk');
     if (chk) chk.checked = !on;
   }
+  // 换引擎：相当于引擎重启，流指示点回到起步的个数
+  function setEngine(name) {
+    if (S.engine !== name) { S.engine = name; S.lanesPeak = 0; }
+    const sel = document.getElementById('engineSel');
+    if (sel) sel.value = name;
+  }
 
   if (KIOSK) {
     document.body.classList.add('kiosk');
@@ -1303,9 +1391,15 @@
     });
     document.getElementById('fastChk').addEventListener('change', (e) => { roundGap = e.target.checked ? 8 : 60; });
     document.getElementById('hookChk').addEventListener('change', (e) => { S.hook = !e.target.checked; });
+    document.getElementById('engineSel').addEventListener('change', (e) => {
+      resetSim(); S.manual = false; S.demo = null;
+      setEngine(e.target.value);
+      syncButtons();
+    });
     document.getElementById('ctxLongChk').addEventListener('change', (e) => { S.ctxExtra = e.target.checked ? 200000 : 0; });
   }
 
+  setEngine(S.engine);
   if (DEMO) demo(DEMO);
   syncButtons();
   requestAnimationFrame(frame);
