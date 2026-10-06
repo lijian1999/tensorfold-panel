@@ -342,6 +342,34 @@ class TestEdges(SeqCase):
         self.assertEqual(health["requests_total"], 0)
         self.assertIsNone(health["epoch"])
 
+    def test_start_not_before_empty(self):
+        """流表空了之后才出现的请求，开始时刻不早于变空的那一刻。"""
+        Z = dict(running=0, waiting=0, queries=0, hits=0, prompt=0, prompt_cached=0, ttft_sum=0.0, ttft_count=0,
+                 generation=0, success=0, req_prompt_sum=0, req_generation_sum=0, req_computed_sum=0,
+                 prefill_s=0.0, decode_s=0.0, drafted=0, accepted=0, epoch=1.0)
+        m1 = dict(Z, running=1, queries=100, prompt=100, ttft_count=1, ttft_sum=0.1, generation=1)       # 一个短请求出首字
+        m2 = dict(Z, queries=100, prompt=100, ttft_count=1, ttft_sum=0.1, generation=5, success=1,
+                  req_prompt_sum=100, req_generation_sum=5, req_computed_sum=100)                         # 它结束了
+        m3 = dict(m2, running=1, queries=23100)                                                           # 又来一个 23000 token 的
+        for t3, want in ((10.75, 10.5), (11.7, 10.5), (13.5, 11.5)):
+            adapter = VllmAdapter()
+            adapter.feed(1.0, Z)
+            adapter.feed(10.0, m1)
+            adapter.feed(10.5, m2)
+            adapter.feed(t3, m3)
+            rows = adapter.rows()
+            self.assertEqual(len(rows), 1, f"t3={t3}")
+            self.assertEqual(rows[0]["phase"], "prefill", f"t3={t3}")
+            self.assertEqual(rows[0]["prompt"], 23000, f"t3={t3}")
+            self.assertAlmostEqual(rows[0]["start"], want, delta=0.001, msg=f"t3={t3}")
+        # 从没有过请求：empty_since 是 None，照常回推。
+        adapter = VllmAdapter()
+        adapter.feed(1.0, Z)
+        adapter.feed(13.5, dict(Z, running=1, queries=23000))
+        rows = adapter.rows()
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["start"], 11.5, delta=0.001)
+
 
 
 from panel.collector import Collector

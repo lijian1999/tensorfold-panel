@@ -131,9 +131,10 @@ class VllmAdapter:
         n = m["running"] - len(self._rows) + fin
         dq = m["queries"] - p["queries"]
         dh = m["hits"] - p["hits"]
-        # 独自出现的条件：此刻流表是空的，且距上次变空够久（empty_since 为 None 视作很久以前）。
-        solo_ok = len(self._rows) == 0 and (self._empty_since is None
-                                            or now - self._empty_since >= 0.25)
+        # 独自出现：此刻流表是空的（empty_since 为 None 视作很久以前）。回推的秒数以
+        # 流表已经空了多久为上限——开始时刻不可能早于流表变空的那一刻。
+        was_empty = len(self._rows) == 0
+        gap = None if self._empty_since is None else now - self._empty_since
         if dq > 0:
             n = max(1, n)
             fresh = [self._new_row(now) for _ in range(n)]
@@ -142,8 +143,15 @@ class VllmAdapter:
             for row, pr, ca in zip(fresh, prompts, caches):
                 row["prompt"] = pr
                 row["cached"] = ca
-                row["start"] = now - min((pr - ca) / tps, self._lag) if solo_ok else now
-                row["solo"] = solo_ok and n == 1
+                if was_empty:
+                    back = min((pr - ca) / tps, self._lag)
+                    if gap is not None:
+                        back = min(back, gap)
+                    row["start"] = now - back
+                else:
+                    row["start"] = now
+                # solo 决定出首字时要不要用来校准 lag，要求确实空了够久。
+                row["solo"] = was_empty and n == 1 and (gap is None or gap >= 1.0)
         elif n > 0:
             for _ in range(n):
                 self._new_row(now)
