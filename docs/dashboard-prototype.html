@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>副屏仪表盘原型</title>
 <!--
-  扩展坞 3.5 英寸副屏 · 本地大模型实时性能仪表盘 · 可点击原型（仅设计稿，非正式实现）
-  画布：480×320 CSS px（macOS「480×320 HiDPI」，实际渲染 960×640）
-  打开 ?kiosk=1 只显示屏幕本身（纯黑背景、自动循环），可加 &theme=beige 切换主题。
+  扩展坞 3.5 英寸副屏 · 本地大模型实时性能仪表盘 · 可点击原型（第 2 版 · DGX Spark，仅设计稿，非正式实现）
+  画布：480×320 CSS px，副屏上放大 2 倍 = 960×640
+  ?kiosk=1 只显示屏幕本身（纯黑背景、自动循环）；再加 &demo=<名字> 停在某个画面：
+  offline / idle / prefill / prefill-fresh / prefill-miss / prefill-nohook / prefill-est / decode / decode-multi / queue / done / round-rest
+  再加 &engine=vllm 按 vLLM 引擎演示（默认 TensorFold；prefill-est 固定是 vLLM，其余几个预填充画面固定是 TensorFold）
 -->
 <style>
   /* ============ 页面（屏幕之外）============ */
@@ -20,7 +22,7 @@
     --page-btn: #2d2e33;
     --page-btn-hover: #37383e;
     --page-accent: #e7e7ea;
-    --font: -apple-system, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+    --font: -apple-system, "SF Pro Text", "SF Pro Display", "PingFang SC", "Noto Sans CJK SC", "Hiragino Sans GB", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
@@ -52,8 +54,8 @@
   .panel .sub { margin: 2px 0 0; color: var(--page-muted); font-size: 12.5px; }
   .group { display: flex; flex-direction: column; gap: 8px; }
   .group-title { font-size: 12px; color: var(--page-muted); letter-spacing: .06em; }
-  .btn-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .btn-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .btn-grid.one { grid-template-columns: 1fr; }
   button, select {
     font: inherit; color: var(--page-text);
     background: var(--page-btn);
@@ -81,14 +83,13 @@
   }
   .readout dt { color: var(--page-muted); }
   .readout dd { margin: 0; text-align: right; }
-  .kiosk-links { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .kiosk-links { display: grid; grid-template-columns: 1fr; gap: 6px; }
   .kiosk-links a {
     display: block; text-align: center; text-decoration: none;
     color: #111; background: #e7e7ea; border-radius: 9px; padding: 8px; font-weight: 600;
   }
-  .kiosk-links a.beige { background: #f5efe4; color: #1a1714; }
   .hint { color: var(--page-muted); font-size: 12px; line-height: 1.6; margin: 0; }
-  .hint kbd { font: inherit; background: var(--page-btn); border-radius: 4px; padding: 0 5px; color: var(--page-text); }
+  .hint code { font-size: 11.5px; color: var(--page-text); }
   details { border-top: 1px solid var(--page-line); padding-top: 12px; }
   summary { cursor: pointer; color: var(--page-text); font-weight: 600; }
   details ul { margin: 8px 0 0; padding-left: 18px; color: var(--page-muted); font-size: 12.5px; }
@@ -132,7 +133,6 @@
 
   /* ============ 屏幕（480×320）============ */
   .screen {
-    /* 深色（默认） */
     --bg: #0a0b0d;
     --card: #14161a;
     --card-line: #1d2025;
@@ -148,26 +148,7 @@
     --pill-bg: rgba(118, 226, 183, .15);
     --pill-text: #8eeac5;
     --num-weight: 700;
-  }
-  .screen.theme-beige {
-    /* 暖米色（参考 MTPLX） */
-    --bg: #f5efe4;
-    --card: #ebe3d5;
-    --card-line: #ebe3d5;
-    --text: #161310;
-    --text-2: #5a5148;
-    --muted: #6c6256;
-    --faint: #a3978a;
-    --track: #e2d8c7;
-    --accent: #37302a;
-    --amber: #b1731c;
-    --danger: #a9453b;
-    --ghost: #b3a795;
-    --pill-bg: #37302a;
-    --pill-text: #f5efe4;
-    --num-weight: 800;
-  }
-  .screen {
+
     position: relative;
     width: 480px; height: 320px;
     overflow: hidden;
@@ -181,7 +162,6 @@
     -webkit-font-smoothing: antialiased;
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum";
-    transition: background-color .4s, color .4s;
     user-select: none;
   }
   .screen * { font-variant-numeric: tabular-nums; }
@@ -193,16 +173,20 @@
     font-size: 13px; line-height: 22px; white-space: nowrap;
     color: var(--muted);
   }
-  .strip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  /* 流指示点：解码中（绿）→ 预填充中（琥珀）→ 空着（灰）；排队数写在后面 */
+  .lanes { display: flex; align-items: center; gap: 4px; flex: none; }
+  .lane { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); opacity: .5; transition: background-color .25s, opacity .25s; }
+  .lane.dec { background: var(--accent); opacity: 1; animation: pulse 1.4s ease-in-out infinite; }
+  .lane.pre { background: var(--amber); opacity: 1; animation: pulse 1s ease-in-out infinite; }
+  .lanes.off .lane { display: none; }
+  .lanes.off .lane:first-child { display: block; width: 8px; height: 8px; background: var(--danger); opacity: 1; }
+  .lanes .queue { font-size: 12px; line-height: 22px; font-weight: 650; color: var(--amber); margin-left: 1px; }
+  .lanes .queue:empty { display: none; }
   .strip .state-name { color: var(--text); font-size: 14px; font-weight: 650; }
+  .strip [data-k="stripLeft"]:empty { display: none; }
   .strip .strip-right { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
   .strip .strip-right b { color: var(--text-2); font-weight: 600; }
   .strip .strip-right .warn { color: var(--amber); font-weight: 650; }
-  .screen[data-state="offline"] .dot { background: var(--danger); }
-  .screen[data-state="idle"] .dot { background: var(--faint); }
-  .screen[data-state="prefill"] .dot { background: var(--amber); animation: pulse 1s ease-in-out infinite; }
-  .screen[data-state="decode"] .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-  .screen[data-state="done"] .dot { background: var(--accent); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
   .main { display: grid; grid-template-columns: 316px 132px; column-gap: 8px; height: 268px; }
@@ -210,17 +194,24 @@
   /* 仪表 */
   .gauge { position: relative; width: 316px; height: 268px; }
   .gauge > svg.dial { position: absolute; inset: 0; overflow: visible; }
-  .dial .track { fill: none; stroke: var(--track); stroke-linecap: round; transition: opacity .6s, stroke .4s; }
-  .dial .notch { stroke: var(--bg); stroke-width: 2.5; transition: stroke .4s; }
+  .dial .track { fill: none; stroke: var(--track); stroke-linecap: round; transition: opacity .6s; }
+  .dial .notch { stroke: var(--bg); stroke-width: 2.5; transition: opacity .6s; }
   .dial .value { fill: none; stroke: var(--accent); stroke-linecap: round; transition: opacity .6s, stroke .4s; }
   .dial .ghost { fill: none; stroke: var(--ghost); stroke-linecap: round; opacity: 0; transition: opacity .6s; }
-  .dial .tick { fill: var(--muted); font-size: 12px; font-weight: 600; font-family: var(--font); transition: opacity .6s; }
+  .dial .tick { fill: var(--muted); font-size: 12px; font-weight: 600; font-family: var(--font); }
+  .dial .ticks { transition: opacity .6s; }
+  .gauge[data-arc="prefill"] .value { stroke: var(--amber); }
   .gauge[data-arc="rest"] .value,
+  .gauge[data-arc="blank"] .value,
   .gauge[data-arc="off"] .value { opacity: 0; }
   .gauge[data-arc="rest"] .ghost { opacity: .9; }
+  .gauge[data-arc="rest"] .ticks { opacity: .75; }
+  .gauge[data-arc="blank"] .track,
   .gauge[data-arc="off"] .track { opacity: .5; }
-  .gauge[data-arc="off"] .tick { opacity: .35; }
-  .gauge[data-arc="rest"] .tick { opacity: .75; }
+  .gauge[data-arc="blank"] .ticks,
+  .gauge[data-arc="off"] .ticks,
+  .gauge[data-arc="blank"] .notch,
+  .gauge[data-arc="off"] .notch { opacity: 0; }
 
   .center { position: absolute; inset: 0; pointer-events: none; }
   .center > * { position: absolute; left: 44px; width: 220px; text-align: center; }
@@ -237,6 +228,8 @@
     letter-spacing: .04em;
   }
   .pill.on { display: inline-block; }
+  /* “近期平均”：数字不是引擎实报的，用琥珀色描边，和实心的“精确”区分开 */
+  .pill.est { background: transparent; color: var(--amber); box-shadow: 0 0 0 1px rgba(240, 180, 76, .5) inset; }
   .screen[data-muted="1"] .pill { background: transparent; color: var(--muted); box-shadow: 0 0 0 1px var(--faint) inset; }
   .big {
     top: 97px; height: 96px;
@@ -249,29 +242,27 @@
   }
   .big .dec { font-size: 40px; letter-spacing: -0.01em; margin-left: 1px; }
   .big.whole .dec { font-size: inherit; letter-spacing: inherit; margin-left: 0; }
+  .big.four { font-size: 76px; }      /* 预填充速度（4 位数） */
+  .big.cost { font-size: 68px; }      /* 今日费用 */
   .screen[data-muted="1"] .big { color: var(--text-2); }
-  .cap .cap-unit { color: var(--muted); }
-  .unit { display: none; top: 194px; font-size: 15px; line-height: 18px; font-weight: 600; color: var(--muted); }
-  /* 上下文占用条（替代小曲线和单位行）：长条在上，文字在下 */
-  .ctx { display: none; top: 205px; left: 94px !important; width: 120px !important; flex-direction: column; align-items: stretch; gap: 5px; }
+  /* 主数字下方：上下文占用条 / 预填充进度条 / 一行说明 */
+  .ctx { display: none; top: 205px; flex-direction: column; align-items: center; gap: 5px; }
   .ctx.on { display: flex; }
-  .ctx-bar { position: relative; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; transition: background-color .4s; }
+  .ctx-bar { position: relative; width: 120px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
   .ctx-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 6px; border-radius: 3px; background: var(--text-2); transition: width .4s, background-color .4s; }
   .ctx.warn .ctx-fill { background: var(--amber); }
   .ctx.full .ctx-fill { background: var(--danger); }
+  .ctx.prog .ctx-fill { background: var(--amber); }
+  .ctx.note .ctx-bar { display: none; }
+  .ctx.note { top: 200px; }
   .ctx-text { font-size: 12px; line-height: 14px; color: var(--muted); white-space: nowrap; text-align: center; }
   .ctx-text b { color: var(--text-2); font-weight: 600; }
-  .spark { top: 216px; left: 94px !important; width: 120px !important; height: 26px; opacity: 0; transition: opacity .5s; }
-  .spark.on { opacity: 1; }
-  .spark .raw { fill: none; stroke: var(--faint); stroke-width: 1; stroke-linejoin: round; }
-  .spark .smooth { fill: none; stroke: var(--accent); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; }
   .offline-msg { top: 108px; display: none; }
   .offline-msg .t1 { font-size: 28px; line-height: 36px; font-weight: 650; color: var(--text-2); }
   .offline-msg .t2 { margin-top: 6px; font-size: 13px; line-height: 18px; color: var(--muted); }
   .screen[data-state="offline"] .offline-msg { display: block; }
   .screen[data-state="offline"] .cap,
-  .screen[data-state="offline"] .big,
-  .screen[data-state="offline"] .unit { display: none; }
+  .screen[data-state="offline"] .big { display: none; }
 
   /* 右侧数据块 */
   .stats { display: flex; flex-direction: column; gap: 6px; height: 268px; }
@@ -282,7 +273,6 @@
     background: var(--card);
     border: 1px solid var(--card-line);
     border-radius: 14px;
-    transition: background-color .4s, border-color .4s;
   }
   .card .lab { font-size: 13px; line-height: 16px; color: var(--muted); white-space: nowrap; }
   .card .val {
@@ -300,7 +290,7 @@
   .screen[data-muted="1"] .card .val,
   .screen[data-state="offline"] .card .val { color: var(--text-2); }
 
-  /* 淡入：中间 / 右侧 / 状态条各自在内容标签变化时淡入，标签没变就不动 */
+  /* 淡入：中间 / 右侧 / 状态条 / 刻度各自在内容标签变化时淡入，标签没变就不动 */
   .swap { animation: swapin .32s ease-out; }
   .swap-slow { animation: swapin .8s ease-in-out; }
   @keyframes swapin { from { opacity: .15; } to { opacity: 1; } }
@@ -314,64 +304,71 @@
 <div class="page">
   <aside class="panel" aria-label="控制面板">
     <div>
-      <h1>副屏仪表盘 · 原型</h1>
-      <p class="sub">TensorFold · Qwen3.8-27B 4-bit · M5 Max 64 GB<br>画布 480×320（HiDPI 实际 960×640）</p>
+      <h1>副屏仪表盘 · 原型（第 2 版）</h1>
+      <p class="sub">TensorFold 或 vLLM（自动识别）· Qwen3.8 Flash Next · DGX Spark 121 GB<br>画布 480×320（副屏上放大 2 倍 = 960×640）</p>
     </div>
 
     <div class="group">
-      <div class="group-title">切换状态</div>
-      <div class="btn-grid" id="stateBtns">
-        <button type="button" data-set-state="offline">引擎离线</button>
-        <button type="button" data-set-state="idle">空闲</button>
-        <button type="button" data-set-state="prefill">预填充</button>
-        <button type="button" data-set-state="decode">解码</button>
-        <button type="button" data-set-state="done">完成</button>
+      <div class="group-title">停在某个画面</div>
+      <div class="btn-grid" id="demoBtns">
+        <button type="button" data-demo="offline">引擎离线</button>
+        <button type="button" data-demo="idle">空闲 · 今日统计</button>
+        <button type="button" data-demo="decode">解码 · 单个请求</button>
+        <button type="button" data-demo="decode-multi">解码 · 并发 3+1</button>
+        <button type="button" data-demo="queue">并发 5 路 · 排队 2</button>
+        <button type="button" data-demo="done">完成 · 单个请求</button>
+        <button type="button" data-demo="round-rest">一轮中间的空隙</button>
       </div>
-      <p class="hint">手动切换时会停住在该状态（解码会持续产出，方便观察平滑效果）。</p>
+      <p class="hint">会停住在该画面（解码持续产出、预填充到头后从头再来），方便细看。</p>
     </div>
 
     <div class="group">
-      <div class="group-title">预填充 · 缓存命中（新）</div>
-      <div class="btn-grid" style="grid-template-columns: 1fr;" id="cacheBtns">
-        <button type="button" data-cache-demo="hit">单次 · 长提示，命中 94%</button>
-        <button type="button" data-cache-demo="fresh">单次 · 新对话贴长文，命中 0%</button>
-        <button type="button" data-cache-demo="miss">编程代理一轮 · 缓存未命中</button>
+      <div class="group-title">预填充画面（新：实时速度和进度）</div>
+      <div class="btn-grid one">
+        <button type="button" data-demo="prefill">单个请求 · 长提示，命中 67%</button>
+        <button type="button" data-demo="prefill-fresh">单个请求 · 从头算 2.5 万 token</button>
+        <button type="button" data-demo="prefill-miss">编程代理一轮 · 缓存未命中</button>
+        <button type="button" data-demo="prefill-nohook">外挂失效时的样子（降级）</button>
+        <button type="button" data-demo="prefill-est">vLLM · 从头算 4 万 token（估算进度）</button>
       </div>
-      <p class="hint">停在预填充里方便看。预计要超过 3 秒的预填充，一开始就切到“已用时”画面，不用再等 3 秒。“编程代理 · 连续 8 次工具调用”模拟里，第 4 次读大文件（正常命中），第 6 次缓存未命中。</p>
+      <p class="hint">预计超过 3 秒的预填充一开始就切到这个画面；3 秒内的短预填充只有状态条和流指示点变化。引擎按 2048 个 token 一块来算，所以速度大约每 0.9 秒跳一次。</p>
+      <p class="hint">vLLM 读不到预填充进度：提示长度和缓存命中是准数，主数字是最近几次请求的平均速度（标“近期平均”，本次预填充期间不变），进度条按时间匀速前进（“已算约”）。新请求要等引擎算完第一步才看得到，这个画面会晚 2–5 秒出现，“已等待”从估计的起点算。</p>
     </div>
 
     <div class="group">
       <div class="group-title">模拟请求</div>
       <select id="scenario" aria-label="请求类型">
-        <option value="auto">自动轮换（散文 / 代码 / 长输出 / 长提示）</option>
-        <option value="prose">中文散文 · 58.2 tok/s</option>
-        <option value="code">Python 代码 · 109.6 tok/s</option>
-        <option value="long">长提示 3.5 万 token · 预填充约 4 s</option>
-        <option value="longout">长输出 1.24 万 token（从 11,200 起播，看 K 格式）</option>
-        <option value="agent">编程代理 · 连续 8 次工具调用（一轮）</option>
+        <option value="auto">自动轮换</option>
+        <option value="prose">单个请求 · 中文散文 63.6 tok/s</option>
+        <option value="code">单个请求 · 代码 97 tok/s</option>
+        <option value="longout">单个请求 · 长输出 1.24 万 token（从 11,200 起播）</option>
+        <option value="hit">单个请求 · 长提示命中 67%，预填充约 9 s</option>
+        <option value="fresh">单个请求 · 从头算 2.5 万 token，预填充约 10 s</option>
+        <option value="agent">编程代理 · 连续 8 次工具调用（一轮，第 6 次缓存未命中）</option>
+        <option value="multi">子代理并发 · 4 路同时工作，其中一路长预填充</option>
+        <option value="queue">一次来 7 个请求 · 5 路在跑，2 个排队</option>
       </select>
-      <button type="button" class="primary" id="simBtn">模拟一次请求</button>
-      <label class="check"><input type="checkbox" id="loopChk"><span>连续循环<small>空闲几秒后自动发起下一次请求</small></span></label>
-    </div>
-
-    <div class="group">
-      <div class="group-title">主题</div>
-      <div class="seg" id="themeBtns">
-        <button type="button" data-set-theme="dark">深色</button>
-        <button type="button" data-set-theme="beige">暖米色</button>
-      </div>
+      <button type="button" class="primary" id="simBtn">模拟</button>
+      <label class="check"><input type="checkbox" id="loopChk"><span>连续循环<small>回到今日统计几秒后自动发起下一次</small></span></label>
+      <label class="check"><input type="checkbox" id="fastChk" checked><span>演示加速<small>一轮的间隔按 8 秒算（正式是 60 秒），不用等太久就能看到今日统计</small></span></label>
     </div>
 
     <div class="group">
       <div class="group-title">显示</div>
+      <select id="engineSel" aria-label="引擎">
+        <option value="tensorfold">引擎：TensorFold（外挂实报进度，最多 5 条流）</option>
+        <option value="vllm">引擎：vLLM（进度按时间估算，流指示点按需增加）</option>
+      </select>
+      <label class="check"><input type="checkbox" id="hookChk"><span>外挂失效<small>预填充画面退回“已用时”，没有缓存命中和速度</small></span></label>
       <label class="check"><input type="checkbox" id="ctxLongChk"><span>模拟长会话<small>上下文 +200K，看接近上限时的琥珀色 / 红色</small></span></label>
     </div>
 
     <div class="group">
       <div class="group-title">实时数值（调试）</div>
       <dl class="readout">
-        <dt>原始 1 秒</dt><dd id="roRaw">—</dd>
-        <dt>平滑 2.5 秒</dt><dd id="roSmooth">—</dd>
+        <dt>流</dt><dd id="roLanes">—</dd>
+        <dt>合计 · 原始 1 秒</dt><dd id="roRaw">—</dd>
+        <dt>合计 · 平滑 2.5 秒</dt><dd id="roSmooth">—</dd>
         <dt>屏幕显示</dt><dd id="roShown">—</dd>
       </dl>
     </div>
@@ -379,34 +376,33 @@
     <div class="group">
       <div class="group-title">在副屏上实测（Kiosk 模式）</div>
       <div class="kiosk-links">
-        <a href="?kiosk=1" target="_blank" rel="noopener">深色 Kiosk</a>
-        <a href="?kiosk=1&amp;theme=beige" target="_blank" rel="noopener" class="beige">暖米色 Kiosk</a>
+        <a href="?kiosk=1" target="_blank" rel="noopener">打开 Kiosk（自动循环）</a>
       </div>
-      <p class="hint">打开后把浏览器窗口拖到扩展坞屏幕上，按 <kbd>⌃⌘F</kbd> 全屏。只显示屏幕本身、自动循环模拟；按 <kbd>T</kbd> 切换主题。窗口比 480×320 小时会自动等比缩小。</p>
+      <p class="hint">只显示屏幕本身。地址后再加 <code>&amp;demo=名字</code> 可以停在某个画面，名字就是上面按钮对应的：offline、idle、decode、decode-multi、queue、done、round-rest、prefill、prefill-fresh、prefill-miss、prefill-nohook、prefill-est。再加 <code>&amp;engine=vllm</code> 按 vLLM 演示。</p>
     </div>
 
     <details>
       <summary>设计说明</summary>
       <ul>
-        <li><b>布局</b>：左 2/3 为 270° 弧形仪表 + 主数字，右 1/3 为 3 个数据块，顶部一条状态条。四周留 12px。</li>
-        <li><b>字号</b>：主数字 96px；右侧数值 30px；标签 / 状态条 13–14px；刻度 12px（全场最小）。</li>
-        <li><b>刻度非线性</b>：0 / 25 / 50 / 100 / 150 / 200，低速段拉宽，30–190 tok/s 的常见区间都看得清。</li>
-        <li><b>平滑</b>：主数字 = 最近 2.5 秒内产出 token 数 ÷ 2.5 秒（开头不足 2.5 秒时按已用时间算，最少按 0.5 秒）；弧线和数字再以约 0.4 秒时间常数缓动。</li>
-        <li><b>峰值</b>：只统计解码开始 1 秒之后的平滑值，避免开头的假尖峰。</li>
-        <li><b>预填充</b>：短预填充（预计不到 3 秒）画面不变，只有状态条显示「预填充中 · 已用时」。已用时超过 3 秒，或者一开始就预计要超过 3 秒时，主数字换成已用秒数。圆弧不动，没有扫动。</li>
-        <li><b>缓存命中（新）</b>：预填充一开始就知道命中多少（引擎 <code>add_stream</code> 的 <code>cached_tokens</code>），新算 = 提示 − 命中，预计时间 ≈ 0.21 s + 新算 ×（1.05 ms + 0.016 ms × 平均位置/1K）：越往后注意力越贵，4 万 token 从头算约 57 s。单次请求（未命中只会出现在一轮模式里）：右侧第一格换成「缓存命中 %」，状态条写新算多少、预计几秒。一轮模式：右侧不动，命中率写在状态条。<b>本轮上一个请求的提示 ≥ 4K、这次提示不短于它的一半、命中不到它的一半、新算 ≥ 4K</b> 时判为“缓存未命中”，标琥珀色；新对话本来就没有缓存，代理顺手发的短请求（起标题等）也不标。</li>
-        <li><b>上下文</b>：仪表中央下方是上下文占用条（替代原来的小曲线），下面一行写“上下文 已用 / 上限”，占到 80% 变琥珀色、95% 变红色。预填充一开始就有准确的提示长度，解码时加上已输出的 token 实时增长；空闲和完成时显示上次的值。单位并入标题行，例如“解码速度 · tok/s”。</li>
-        <li><b>一轮</b>：上一个请求结束后 60 秒内来的请求算同一轮（编程代理的连续工具调用）。本轮请求 ≥ 2 次时右侧固定为 本轮请求 / 累计输出 / 本轮平均，不在解码中显示时主数字是本轮平均（灰色，精确），不再单独显示完成画面；60 秒没有新请求后改叫「上轮」。</li>
-        <li><b>解码</b>：右侧为 输出 / 平均 / 峰值。「平均」= 首字之后的输出 tokens ÷ 首字之后经过的时间，和引擎最终 tok/s 同一算法，会逐渐收敛到完成时的精确值。首字时间放在状态条。第 1 层解码中拿不到接受率，所以不显示。</li>
-        <li><b>完成</b>：大数字是引擎给出的本次平均速度（精确值），带「精确」标记；4 秒后淡回空闲（手动选择时停留）。</li>
-        <li><b>空闲</b>：主数字变灰，显示上一次的最终速度；弧线上留一个小点标出上次位置。</li>
+        <li><b>显示的是整台机器</b>：最多 5 条流同时跑，所有数字要么是所有流的合计，要么是这一轮的累计。</li>
+        <li><b>流指示点</b>：状态条最左边 5 个点，从左到右是解码中（绿）、预填充中（琥珀）、空着（灰）；有排队时后面写“+2”。</li>
+        <li><b>状态</b>：有任何一条流在解码就是“解码中”；没有解码、有预填充才是“预填充中”；全部结束才是“完成”。</li>
+        <li><b>解码</b>：仪表盘是所有流的合计速度（最近 2.5 秒平均）。刻度 0 / 25 / 50 / 100 / 200 / 300，前密后疏。多条流时状态条写“解码 n · 预填充 n · 排队 n”。</li>
+        <li><b>预填充（新）</b>：仪表盘是实时预填充速度（琥珀色，刻度 0–3K），下面是进度条“已算 / 提示”。单个请求时右侧是“缓存命中 / 已等待 / 内存”；一轮模式下右侧不变，已用时、缓存命中、剩余时间写在状态条。</li>
+        <li><b>一轮</b>：上一个请求结束后 60 秒内来的请求算同一轮；并发的请求一定在同一轮。本轮请求 ≥ 2 时右侧固定为“本轮请求 / 累计输出 / 本轮平均”。本轮没出现过并发时平均值是引擎给的精确值（带“精确”）；出现过并发时改为“本轮输出 ÷ 有流在解码的时长”，和仪表盘的合计速度一致。</li>
+        <li><b>完成</b>：所有流都结束才出现，停 4 秒。单个请求显示引擎的精确成绩；一轮模式显示本轮统计（灰色）。</li>
+        <li><b>空闲 = 今日统计（新）</b>：今日费用（按 API 价格折算：输入 $0.15、缓存命中 $0.016、输出 $0.47，每百万 token）、今日输入、输出、请求数。按太平洋时间 0 点清零。一轮中间的空隙不切到今日统计，一轮结束后才切。</li>
+        <li><b>上下文条</b>：显示占用最大的那条流。占到 80% 变琥珀色、95% 变红色。</li>
+        <li><b>外挂失效</b>：预填充画面退回“已用时”，其他不受影响；今日统计的状态条会标“外挂未生效”。</li>
+        <li><b>两种引擎（新）</b>：空闲和离线时模型名后面标出当前引擎（TensorFold 标了“外挂未生效”时不再重复写引擎名）。vLLM 没有外挂：预填充画面的速度和进度是估算的；流指示点从 4 个起，同时在跑的流多了再加；长预填充期间其他流几乎不出字，仪表盘会如实掉到个位数。</li>
+        <li><b>没有模拟的</b>：空闲 30 分钟后画面调暗到 40%。</li>
       </ul>
     </details>
   </aside>
 
   <main class="stage">
     <figure class="fig">
-      <figcaption><b>实际尺寸</b><span>480×320 CSS px · 在副屏上即 1:1</span></figcaption>
+      <figcaption><b>实际尺寸</b><span>480×320 CSS px</span></figcaption>
       <div class="bezel"><div class="bezel-glass"><div class="mount" id="mount1x"></div></div></div>
     </figure>
     <figure class="fig">
@@ -423,13 +419,13 @@
 <template id="screenTpl">
   <div class="screen" data-state="idle">
     <header class="strip">
-      <span class="dot"></span>
+      <span class="lanes"><span class="queue"></span></span>
       <span class="state-name" data-k="stateName">空闲</span>
-      <span data-k="stripLeft">Qwen3.8-27B</span>
+      <span data-k="stripLeft"></span>
       <span class="strip-right" data-k="stripRight"></span>
     </header>
     <div class="main">
-      <div class="gauge" data-arc="rest">
+      <div class="gauge" data-arc="blank">
         <svg class="dial" viewBox="0 0 316 268" width="316" height="268" aria-hidden="true">
           <path class="track" pathLength="1000"></path>
           <g class="notches"></g>
@@ -438,17 +434,12 @@
           <g class="ticks"></g>
         </svg>
         <div class="center">
-          <div class="cap"><span data-k="cap">上次平均 · tok/s</span><span class="pill">精确</span></div>
-          <div class="big"><span data-k="bigInt">58</span><span class="dec" data-k="bigDec">.2</span></div>
-          <div class="unit" data-k="unit">tok/s</div>
-          <svg class="spark" viewBox="0 0 120 26" width="120" height="26" aria-hidden="true">
-            <polyline class="raw" points=""></polyline>
-            <polyline class="smooth" points=""></polyline>
-          </svg>
+          <div class="cap"><span data-k="cap"></span><span class="pill">精确</span></div>
+          <div class="big"><span data-k="bigInt"></span><span class="dec" data-k="bigDec"></span></div>
           <div class="ctx"><div class="ctx-bar"><div class="ctx-fill"></div></div><div class="ctx-text"></div></div>
           <div class="offline-msg">
             <div class="t1">引擎离线</div>
-            <div class="t2">等待 TensorFold 响应…</div>
+            <div class="t2">等待引擎响应…</div>
           </div>
         </div>
       </div>
@@ -468,51 +459,66 @@
   // ---------- 参数 ----------
   const qs = new URLSearchParams(location.search);
   const KIOSK = qs.get('kiosk') === '1';
-  let theme = qs.get('theme') === 'beige' ? 'beige' : 'dark';
-  if (!qs.get('theme') && !KIOSK) {
-    try { theme = localStorage.getItem('dock-dash-theme') || theme; } catch (e) {}
-  }
+  const DEMO = qs.get('demo');
 
-  const MODEL = 'Qwen3.8-27B';
-  const MEM_TOTAL = 64;
-  const CTX_MAX = 248320;      // tfpanel serve … --context 248320
-  const WINDOW = 2.5;          // 平滑窗口（秒）
-  const EASE_TAU = 0.4;        // 弧线/数字缓动时间常数（秒）
-  const DONE_HOLD = 4;         // 完成态停留（秒）
+  const MODEL = 'Qwen3.8-Flash-Next';
+  const MEM_TOTAL = 121;       // GB
+  const MEM_BASE = 94.2;       // 模型加载后的已用内存
+  const MEM_LANE = 4.47;       // 一条流占满上下文时的缓存（GB）
+  const CTX_MAX = 262144;      // --context 262144
+  const LANES = 5;             // TensorFold：--parallel 5
+  const LANES_DRAWN = 12;      // 流指示点最多画这么多个
+  const WINDOW = 2.5;          // 解码速度平滑窗口（秒）
+  const EASE_TAU = 0.4;        // 圆弧 / 数字缓动时间常数（秒）
+  const DONE_HOLD = 4;         // 完成画面停留（秒）
   const PREFILL_SHORT = 3;     // 预填充前 3 秒不接管画面（秒）
-  const ROUND_GAP = 60;        // 上一个请求结束后多久内的新请求算同一轮（秒）
-  // 预填充时间 ≈ A + N × (B + K × 平均位置)，N = 新算 token，平均位置 = 命中 + N/2（注意力越往后越慢）
-  // 本机 TensorFold 日志 148 个请求拟合：2 秒以上的误差中位数 3%，90% 在 7% 以内
-  const PF_A = 0.213, PF_B = 1.048e-3, PF_K = 1.62e-8;
-  const prefillEst = (C, N) => PF_A + N * (PF_B + PF_K * (C + N / 2));
+  const CHUNK = 2048;          // 引擎每块预填充的 token 数：进度每算完一块才更新
+  const PF_SPEED = 2372;       // 实测：单独预填充的速度（tok/s）
+  const PF_SHARED = 0.7;       // 有流在解码时，预填充只拿到一部分时间
+  const PF_EST = 2300;         // 预计预填充时间 = 新算 ÷ 这个速度
   const MISS_MIN = 4000;       // “缓存未命中”：上一个请求的提示、这次新算的 token 都至少这么多
+  const PRICE = { input: 0.15, cached: 0.016, output: 0.47 };   // 美元 / 百万 token
+  // 并发时每条流的速度系数：1 路 63.6，4 路合计约 114.5（每路 29.7）
+  const CONC = [1, 1, 0.72, 0.56, 0.47, 0.40];
+  let roundGap = 8;            // 一轮的间隔（秒）；正式是 60，演示加速时按 8
 
-  // 实测数据（预填充时间按上面的拟合式对齐）
-  const SCEN = {
-    prose: { name: '中文散文',    prompt: 22,    cached: 0,     ttft: 0.457, out: 570, final: 58.2,  accept: 61, mem: 21.4 },
-    code:  { name: 'Python 代码', prompt: 32,    cached: 0,     ttft: 0.102, out: 600, final: 109.6, accept: 78, mem: 21.5 },
-    long:  { name: '长提示',      prompt: 35012, cached: 32768, ttft: 3.8,   out: 420, final: 44.8,  accept: 66, mem: 24.3 },
-    // 新对话贴一篇长文：本来就没有缓存
-    fresh: { name: '新对话长文',  prompt: 12380, cached: 0,     ttft: 14.4,  out: 520, final: 52.6,  accept: 64, mem: 23.1 },
-    // 编程代理一轮里缓存突然未命中：4 万 token 全部重算
-    miss:  { name: '缓存未命中',  prompt: 41230, cached: 0,     ttft: 57.2,  out: 380, final: 42.1,  accept: 63, mem: 25.1 },
-    // 演示用：编程代理的长输出，从第 11,200 个 token 起播，只模拟最后 1,200 个，用来看 K 格式
-    longout: { name: '长输出',    prompt: 18420, cached: 18176, ttft: 0.62,  out: 12400, final: 104.3, accept: 74, mem: 22.8, skip: 11200 },
+  // 两种引擎。vLLM 的数字是 2026-10-06 实测的那一套（并发上限 16，预填充约 2,200 tok/s，单流解码约 45 tok/s）
+  const ENGINE = {
+    tensorfold: { name: 'TensorFold', cap: LANES, pf: PF_SPEED, pfAvg: PF_EST, dec: 1 },
+    vllm:       { name: 'vLLM',       cap: 16,    pf: 2200,     pfAvg: 2200,   dec: 0.72 },
   };
-  const ROTATION = ['prose', 'code', 'longout', 'prose', 'code', 'long'];
+  const V_FIRST_STEP = 8192;   // vLLM：第一步最多算这么多 token，算完之前面板看不到这个请求
+  const V_LAG_TYP = 2.0;       // vLLM：起点回推的上限（典型延迟，秒）
 
-  // ---------- 仪表几何 ----------
+  const SCEN = {
+    prose:   { prompt: 58,    cached: 0,     out: 570,   final: 63.6, accept: 70 },
+    code:    { prompt: 96,    cached: 0,     out: 600,   final: 97.2, accept: 81 },
+    // 长输出：从第 11,200 个 token 起播，只模拟最后 1,200 个，用来看 K 格式
+    longout: { prompt: 18420, cached: 18176, out: 12400, final: 88.4, accept: 76, skip: 11200 },
+    // 长提示，前面 4 万命中缓存，新算 2 万
+    hit:     { prompt: 61200, cached: 40960, out: 420,   final: 55.3, accept: 66 },
+    // 新对话贴一篇长文：本来就没有缓存（实测 24,615 token 预填充 10.4 秒）
+    fresh:   { prompt: 24615, cached: 0,     out: 420,   final: 59.7, accept: 68 },
+    // 编程代理一轮里缓存突然未命中：4 万 token 全部重算
+    miss:    { prompt: 41230, cached: 0,     out: 380,   final: 57.1, accept: 65 },
+    // vLLM 实测：39,884 token 从头算，18.2 秒
+    vfresh:  { prompt: 39884, cached: 0,     out: 420,   final: 62.5, accept: 26 },
+  };
+  const ROTATION = ['prose', 'agent', 'multi', 'hit', 'code', 'queue', 'fresh'];
+
+  // ---------- 仪表几何与两套刻度 ----------
   const G = { cx: 154, cy: 144, R: 124, SW: 14 };
-  const TICKS = [0, 25, 50, 100, 150, 200];
-  const TF    = [0, .2, .4, .6, .8, 1];       // 刻度位置（0–1）：5 段等分，左右对称；数值非线性（前两段各 25，后三段各 50）
-  const v2f = (v) => {
-    if (v <= 0) return 0;
-    if (v >= 200) return 1;
-    for (let i = 1; i < TICKS.length; i++) {
-      if (v <= TICKS[i]) {
-        const t = (v - TICKS[i - 1]) / (TICKS[i] - TICKS[i - 1]);
-        return TF[i - 1] + t * (TF[i] - TF[i - 1]);
-      }
+  const TF = [0, .2, .4, .6, .8, 1];        // 刻度位置（0–1）：5 段等分，左右对称
+  const SCALE = {
+    decode:  { ticks: [0, 25, 50, 100, 200, 300],        labels: ['0', '25', '50', '100', '200', '300'] },
+    prefill: { ticks: [0, 600, 1200, 1800, 2400, 3000],  labels: ['0', '600', '1.2K', '1.8K', '2.4K', '3K'] },
+  };
+  const v2f = (v, scale) => {
+    const T = SCALE[scale].ticks;
+    if (!(v > 0)) return 0;
+    if (v >= T[5]) return 1;
+    for (let i = 1; i < T.length; i++) {
+      if (v <= T[i]) return TF[i - 1] + (v - T[i - 1]) / (T[i] - T[i - 1]) * (TF[i] - TF[i - 1]);
     }
     return 1;
   };
@@ -530,7 +536,8 @@
     const NS = 'http://www.w3.org/2000/svg';
     const notches = svg.querySelector('.notches');
     const ticks = svg.querySelector('.ticks');
-    TF.forEach((f, i) => {
+    const els = [];
+    TF.forEach((f) => {
       const deg = f2deg(f);
       if (f > 0 && f < 1) {
         const [x1, y1] = pt(deg, G.R - G.SW / 2 - 1), [x2, y2] = pt(deg, G.R + G.SW / 2 + 1);
@@ -550,9 +557,10 @@
       t.setAttribute('x', fx(tx)); t.setAttribute('y', fx(ty));
       t.setAttribute('text-anchor', anchor);
       t.setAttribute('dominant-baseline', 'central');
-      t.textContent = TICKS[i];
       ticks.appendChild(t);
+      els.push(t);
     });
+    return els;
   }
 
   // ---------- 创建屏幕实例 ----------
@@ -562,12 +570,22 @@
     const mount = document.getElementById(id);
     const node = tpl.content.firstElementChild.cloneNode(true);
     mount.appendChild(node);
-    buildDial(node.querySelector('svg.dial'));
+    const tickEls = buildDial(node.querySelector('svg.dial'));
+    const lanes = node.querySelector('.lanes');
+    const queue = lanes.querySelector('.queue');
+    const laneEls = [];
+    for (let i = 0; i < LANES_DRAWN; i++) {
+      const el = document.createElement('i');
+      el.className = 'lane';
+      lanes.insertBefore(el, queue);
+      laneEls.push(el);
+    }
     const k = {};
     node.querySelectorAll('[data-k]').forEach(el => { k[el.dataset.k] = el; });
     return {
-      root: node, k,
+      root: node, k, tickEls, lanes, laneEls, queue,
       gauge: node.querySelector('.gauge'),
+      ticks: node.querySelector('.dial .ticks'),
       value: node.querySelector('.dial .value'),
       ghost: node.querySelector('.dial .ghost'),
       center: node.querySelector('.center'),
@@ -578,9 +596,6 @@
       strip: node.querySelector('.strip'),
       pill: node.querySelector('.pill'),
       big: node.querySelector('.big'),
-      spark: node.querySelector('.spark'),
-      sparkRaw: node.querySelector('.spark .raw'),
-      sparkSmooth: node.querySelector('.spark .smooth'),
       vals: [...node.querySelectorAll('[data-k-val]')],
       cache: {},
     };
@@ -588,341 +603,503 @@
 
   // ---------- 状态 ----------
   const now = () => performance.now() / 1000;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+  const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+
   const S = {
-    state: 'idle', since: now(), manual: false,
-    last: finalsOf(SCEN.prose),
-    req: null,
-    offlineSince: now() - 42,
-    display: 0,
-    showSpark: true,
-    autoLoop: KIOSK, loopNextAt: now() + 2.5,
-    rot: 0,
-    spark: [], sparkAt: 0,
-    lastFrame: now(),
-    swap: null,
+    streams: [],      // 已占用一条流的请求（预填充或解码）
+    waiting: [],      // 排队的请求
+    sched: [],        // 待发起：{ at, sc }
+    events: [],       // 合计解码产出：[时刻, token 数]
+    offline: false, offlineSince: 0,
+    hold: null,       // 手动停住：'done' / 'round-rest'
+    manual: false, demo: null,
+    hook: true,       // 容器内外挂是否生效
+    engine: qs.get('engine') === 'vllm' ? 'vllm' : 'tensorfold',
+    hidden: [],       // vLLM：已经发出、引擎还没算完第一步的请求（面板看不到）
+    lanesPeak: 0,     // vLLM：这次引擎启动以来同时在跑的最大条数
+    last: { final: 63.6, out: 570, ttft: 0.07, prompt: 58, cached: 0, accept: 70, ctx: 628 },
+    lastDoneAt: -1e9,
+    prevState: 'idle',
+    round: null,      // { t0, done, out, tokSum, decS, wall, overlapped, lastEnd, lastPrompt }
+    agent: null, multi: null,
+    // 今日用量：模型这次启动后前 14 小时的实际数字（约 $0.60）
+    today: { inp: 8260391, cached: 5443627, out: 185305, req: 98 },
+    display: 63.6,    // 缓动中的解码速度值（数字用）
+    frac: 0,          // 缓动中的圆弧位置（0–1）
+    smooth: 0, raw: 0, peak: 0, decStart: 0,
+    bigShown: '', bigAt: 0,
+    restKind: 'today',
+    slow: false,
+    autoLoop: KIOSK && !DEMO, loopNextAt: now() + 2.5, rot: 0,
     ctxExtra: 0,
-    round: null,     // 一轮：{ t0, requests, out, tokSum, decS, lastEnd }
-    agent: null,     // 模拟编程代理：{ i, n, nextAt }
+    lastFrame: now(),
   };
 
-  function finalsOf(sc) {
-    return {
-      final: sc.final, out: sc.out, ttft: sc.ttft, prompt: sc.prompt, cached: sc.cached,
-      accept: sc.accept, ctx: sc.prompt + sc.out, mem: sc.mem,
-    };
+  // ---------- 请求的生命周期 ----------
+  // 一轮：没有进行中的请求、且距上一个请求结束超过 roundGap 时开始新的一轮；有请求在跑时来的算并发
+  function roundBegin(t) {
+    const busy = S.streams.length + S.waiting.length > 0;
+    if (!S.round || (!busy && t - S.round.lastEnd > roundGap)) {
+      S.round = { t0: t, done: 0, out: 0, tokSum: 0, decS: 0, wall: 0, overlapped: false, lastEnd: t, lastPrompt: null };
+    } else if (busy) {
+      S.round.overlapped = true;
+    }
   }
 
-  function setState(st, opts = {}) {
-    const prev = S.state;
-    S.state = st;
-    S.since = now();
-    if (prev !== st) S.swap = opts.slow ? 'swap-slow' : 'swap';
-    syncButtons();
-  }
-
-  // 由平均速度反推「每轮平均 token 数」，并按随机「难易段」上下浮动
-  function newRequest(key, endless, scOverride) {
-    const sc = scOverride || SCEN[key];
-    const t = now();
-    return {
-      key, sc, endless: !!endless,
-      t0: t, decodeStart: 0, emitted: 0, events: [],
+  function launch(sc, t, opts = {}) {
+    const s = {
+      sc, t0: t, start: t, jit: 1, phase: 'wait', prompt: sc.prompt, cached: sc.cached,
+      prog: 0, filled: sc.cached, lastFilled: sc.cached, stepAt: 0, pfSpeed: null,
+      out: sc.skip || 0, emitted: 0, decodeStart: 0, ttft: 0,
       nextRound: 0, regimeUntil: 0, mult: 1,
-      peak: 0, smooth: 0, raw: 0,
-      acc: sc.accept, accAt: 0,
-      memStart: S.last ? Math.min(S.last.mem, 21.3) : 21.2,
+      endless: !!opts.endless,
     };
+    if (S.engine === 'vllm') {
+      // vLLM：新请求要等分词和第一步算完才出现在指标里；引擎本来就在跑别的请求时几乎立刻出现
+      const need = sc.prompt - sc.cached;
+      s.jit = rand(0.88, 1.12);                       // 这次的实际速度和“近期平均”总有出入
+      s.tok = 0.12 + sc.prompt / 40000;               // 分词
+      // “停在某个画面”时不等这几秒，直接从面板第一次看到它的那一刻开始演示
+      s.lag = opts.endless ? 0 : S.streams.length ? 0.15 : s.tok + Math.min(need, V_FIRST_STEP) / (ENGINE.vllm.pf * s.jit);
+      S.hidden.push(s);
+      return s;
+    }
+    roundBegin(t);
+    if (S.streams.length >= ENGINE[S.engine].cap) S.waiting.push(s); else admit(s, t);
+    return s;
+  }
+
+  // vLLM：请求第一次出现在指标里。起点往回推（新算 ÷ 平均速度，不超过典型延迟）；引擎不空闲时不回推
+  function reveal(s, t) {
+    const need = s.prompt - s.cached;
+    s.start = S.streams.length ? t : t - Math.min(need / ENGINE.vllm.pfAvg, V_LAG_TYP);
+    s.prog = Math.min(need * 0.98, ENGINE.vllm.pf * s.jit * Math.max(0, t - s.t0 - s.tok));
+    roundBegin(t);
+    if (S.streams.length >= ENGINE.vllm.cap) S.waiting.push(s); else admit(s, t);
+  }
+
+  function admit(s, t) {
+    s.phase = 'prefill';
+    s.admitAt = t;
+    s.stepAt = t + 0.06;
+    S.streams.push(s);
+  }
+
+  function beginDecode(s, t) {
+    s.phase = 'decode';
+    s.filled = s.prompt;
+    s.decodeStart = t;
+    s.ttft = t - s.t0;
+    s.nextRound = t;
+    s.regimeUntil = t;
+  }
+
+  // 一轮草稿验证吐出 1–8 个 token；按随机“难易段”上下浮动
+  function emitRound(s, t, nDec) {
+    if (t >= s.regimeUntil) {
+      const x = Math.random();
+      s.mult = x < 0.35 ? 0.45 : x < 0.7 ? 1.0 : 1.75;
+      s.regimeUntil = t + rand(0.5, 1.4);
+    }
+    if (S.engine === 'vllm' && S.streams.some(x => x.phase === 'prefill')) {
+      // vLLM 实测：别的请求在预填充时，一步约 1 秒，解码中的流每步只出一两个 token
+      let k = Math.random() < 0.5 ? 1 : 2;
+      if (!s.endless) k = Math.min(k, s.sc.out - (s.sc.skip || 0) - s.emitted);
+      s.emitted += k; s.out += k;
+      S.events.push([t, k]);
+      s.nextRound = t + rand(0.8, 1.2);
+      return;
+    }
+    const target = s.sc.final * CONC[Math.min(nDec, 5)] * ENGINE[S.engine].dec;
+    const elapsed = t - s.decodeStart;
+    let fb = 1;
+    if (elapsed > 0.8 && s.emitted > 0) fb = clamp((target * elapsed) / s.emitted, 0.7, 1.5);
+    const m = clamp(target * 0.05 * s.mult * fb, 1, 7.6);
+    const p = (m - 1) / 7;
+    let k = 1;
+    for (let i = 0; i < 7; i++) if (Math.random() < p) k++;
+    if (!s.endless) k = Math.min(k, s.sc.out - (s.sc.skip || 0) - s.emitted);
+    s.emitted += k;
+    s.out += k;
+    S.events.push([t, k]);
+    s.nextRound = t + rand(0.03, 0.07);
+  }
+
+  function finish(s, t) {
+    const dur = Math.max(0.05, t - s.decodeStart);
+    S.last = {
+      final: s.emitted / dur, out: s.out, ttft: s.ttft, prompt: s.prompt, cached: s.cached,
+      accept: s.sc.accept, ctx: s.prompt + s.out,
+    };
+    const R = S.round;
+    R.done++; R.out += s.out; R.tokSum += s.emitted; R.decS += dur;
+    R.lastEnd = t; R.lastPrompt = s.prompt;
+    S.today.inp += s.prompt; S.today.cached += s.cached; S.today.out += s.out; S.today.req++;
+    S.streams.splice(S.streams.indexOf(s), 1);
+    if (S.waiting.length) admit(S.waiting.shift(), t);
+    if (!S.streams.length) S.lastDoneAt = t;
+    // 子代理并发：一个请求结束后，同一个子代理多半会接着发下一个（提示变长，前面都命中）
+    if (S.multi && S.multi.left > 0 && Math.random() < 0.8) {
+      S.multi.left--;
+      const prompt = s.prompt + s.out + Math.round(rand(300, 2500));
+      S.sched.push({ at: t + rand(0.3, 2.5), sc: {
+        prompt, cached: prompt - Math.round(rand(300, 2500)),
+        out: Math.round(rand(120, 420)), final: rand(58, 72), accept: Math.round(rand(60, 78)),
+      } });
+    }
+  }
+
+  function screenState(t) {
+    if (S.offline) return 'offline';
+    if (S.streams.some(s => s.phase === 'decode')) return 'decode';
+    if (S.streams.length) return 'prefill';
+    if (S.hold === 'done') return 'done';
+    if (S.hold === 'round-rest') return 'idle';
+    if (t - S.lastDoneAt < DONE_HOLD) return 'done';
+    return 'idle';
+  }
+
+  // ---------- 发起模拟 ----------
+  function resetSim() {
+    S.streams = []; S.waiting = []; S.sched = []; S.events = []; S.hidden = [];
+    S.agent = null; S.multi = null; S.hold = null; S.offline = false;
+    S.round = null; S.lastDoneAt = -1e9;
   }
 
   function startRequest(key) {
     if (key === 'auto' || !key) { key = ROTATION[S.rot % ROTATION.length]; S.rot++; }
-    S.manual = false;
-    if (key === 'agent') { S.agent = { i: 0, n: 8, nextAt: 0 }; agentStep(); return; }
-    S.agent = null;
-    S.req = newRequest(key);
-    S.spark = [];
-    roundBegin(now());
-    setState('prefill');
+    if (S.manual) { resetSim(); S.manual = false; S.demo = null; syncButtons(); }
+    const t = now();
+    if (key === 'agent') { S.agent = { i: 0, n: 8, nextAt: 0 }; agentStep(t); return; }
+    if (key === 'multi') {
+      // 4 个子代理同时开工：三个接着已有对话（短预填充），一个刚读了大文件（新算 1.9 万，约 12 秒）
+      S.multi = { left: 5 };
+      S.sched.push(
+        { at: t,       sc: { prompt: 9200,  cached: 8192,  out: 420, final: 66, accept: 72 } },
+        { at: t + 0.4, sc: { prompt: 12400, cached: 10240, out: 260, final: 61, accept: 68 } },
+        { at: t + 0.9, sc: { prompt: 21000, cached: 2048,  out: 380, final: 60, accept: 66 } },
+        { at: t + 2.5, sc: { prompt: 7600,  cached: 6144,  out: 520, final: 70, accept: 74 } },
+      );
+      return;
+    }
+    if (key === 'queue') {
+      for (let i = 0; i < 7; i++) {
+        const prompt = Math.round(rand(6000, 11000));
+        S.sched.push({ at: t + i * 0.08, sc: {
+          prompt, cached: Math.floor((prompt - rand(300, 1500)) / CHUNK) * CHUNK,
+          out: Math.round(rand(180, 420)), final: rand(58, 72), accept: Math.round(rand(60, 78)),
+        } });
+      }
+      return;
+    }
+    launch(SCEN[key], t);
   }
 
   // 编程代理的一次工具调用：短预填充、短输出；第 4 次读了大文件（新算 3.3K，正常命中），第 6 次缓存未命中（全部重算）
-  function agentStep() {
+  function agentStep(t) {
     const a = S.agent;
     const i = a.i++;
     a.nextAt = 0;
     const prompt = 8000 + i * 900 + (i >= 3 ? 2400 : 0);
     const cached = i === 3 ? 8000 + 2 * 900 : i === 5 ? 0 : prompt - Math.round(rand(200, 900));
-    const sc = {
-      name: '工具调用', prompt, cached,
-      ttft: prefillEst(cached, prompt - cached) * rand(0.95, 1.07), out: Math.round(rand(40, 260)),
-      final: Math.round(rand(62, 108) * 10) / 10, accept: Math.round(rand(55, 80)), mem: 21.6,
-    };
-    S.req = newRequest(null, false, sc);
-    S.spark = [];
-    roundBegin(now());
-    setState('prefill');
+    launch({
+      prompt, cached, out: Math.round(rand(40, 260)),
+      final: Math.round(rand(56, 92) * 10) / 10, accept: Math.round(rand(55, 80)),
+    }, t);
   }
 
-  // 一轮：没有进行中的请求、且距上一轮最后一次结束超过 ROUND_GAP 时开始新的一轮
-  function roundBegin(t) {
-    if (!S.round || t - S.round.lastEnd > ROUND_GAP) {
-      S.round = { t0: t, requests: 0, out: 0, tokSum: 0, decS: 0, lastEnd: t };
-    }
-  }
-  function roundFinish(sc, t) {
-    const R = S.round;
-    if (!R) return;
-    R.requests++;
-    R.out += sc.out;
-    R.tokSum += sc.out;
-    R.decS += sc.out / sc.final;
-    R.lastEnd = t;
-    R.lastPrompt = sc.prompt;   // 下一个请求至少应命中这么多
-  }
-
-  function beginDecode(t) {
-    const r = S.req;
-    r.decodeStart = t;
-    r.nextRound = t;
-    r.regimeUntil = t;
-    S.spark = [];
-    setState('decode');
-  }
-
-  function rand(a, b) { return a + Math.random() * (b - a); }
-
-  function emitRound(r, t) {
-    // 难易段：投机解码在「好猜」的片段一次吐 6–8 个，难的地方只吐 1–2 个
-    if (t >= r.regimeUntil) {
-      const x = Math.random();
-      r.mult = x < 0.35 ? 0.45 : x < 0.7 ? 1.0 : 1.75;
-      r.regimeUntil = t + rand(0.5, 1.4);
-    }
-    const target = r.sc.final;
-    const elapsed = t - r.decodeStart;
-    let fb = 1;
-    if (elapsed > 0.8 && r.emitted > 0) fb = Math.min(1.5, Math.max(0.7, (target * elapsed) / r.emitted));
-    const meanInterval = 0.05;
-    let m = target * meanInterval * r.mult * fb;
-    m = Math.min(7.6, Math.max(1, m));
-    const p = (m - 1) / 7;
-    let k = 1;
-    for (let i = 0; i < 7; i++) if (Math.random() < p) k++;
-    if (!r.endless) k = Math.min(k, r.sc.out - (r.sc.skip || 0) - r.emitted);
-    r.emitted += k;
-    r.events.push([t, k]);
-    r.nextRound = t + rand(0.03, 0.07);
-  }
-
-  function finishRequest(t) {
-    const r = S.req;
-    S.last = finalsOf(r.sc);
-    S.last.peak = r.peak;
-    roundFinish(r.sc, t);
-    setState('done');
-  }
-
-  // ---------- 手动状态 ----------
-  function manualState(st) {
-    S.manual = true;
-    S.autoLoop = false;
-    S.round = null;
-    S.agent = null;
-    document.getElementById('loopChk').checked = false;
-    if (st === 'offline') { S.req = null; S.offlineSince = now() - 42; setState('offline'); }
-    else if (st === 'idle') { S.req = null; setState('idle'); }
-    else if (st === 'prefill') { S.req = newRequest('long', true); S.req.t0 = now(); setState('prefill'); }
-    else if (st === 'decode') {
-      S.req = newRequest('prose', true);
-      S.req.t0 = now() - SCEN.prose.ttft;
-      beginDecode(now());
-    }
-    else if (st === 'done') {
-      const key = 'code';
-      S.req = newRequest(key);
-      S.spark = [];
-      S.last = finalsOf(SCEN[key]);
-      S.last.peak = 138;
-      setState('done');
-    }
-  }
-
-  // 缓存命中演示：停在预填充
-  function cacheDemo(kind) {
-    manualState('idle');
+  // 手动停在某个画面
+  function demo(name) {
+    resetSim();
+    S.manual = true; S.demo = name; S.autoLoop = false;
+    const loopChk = document.getElementById('loopChk');
+    if (loopChk) loopChk.checked = false;
+    setHook(name !== 'prefill-nohook');
+    // 估算版预填充只有 vLLM 有；其余几个预填充画面是 TensorFold 的；别的画面沿用当前选的引擎
+    if (name === 'prefill-est') setEngine('vllm');
+    else if (name.startsWith('prefill')) setEngine('tensorfold');
     const t = now();
-    if (kind === 'hit') {
-      S.req = newRequest('long', true);
-    } else if (kind === 'fresh') {
-      S.req = newRequest('fresh', true);
-    } else {
-      // 编程代理已跑了 5 次，上一次提示 40.1K；这一次本该命中 4 万，结果全部重算
-      S.round = { t0: t - 95, requests: 5, out: 1830, tokSum: 1830, decS: 1830 / 78.4, lastEnd: t - 0.4, lastPrompt: 40120 };
-      S.req = newRequest('miss', true);
+    const endless = { endless: true };
+    switch (name) {
+      case 'offline': S.offline = true; S.offlineSince = t - 42; break;
+      case 'idle': break;
+      case 'prefill': launch(SCEN.hit, t, endless); break;
+      case 'prefill-fresh':
+      case 'prefill-nohook': launch(SCEN.fresh, t, endless); break;
+      case 'prefill-est': launch(SCEN.vfresh, t, endless); break;
+      case 'prefill-miss':
+        // 编程代理已跑了 5 次，上一次提示 40.1K；这一次本该命中 4 万，结果全部重算
+        S.round = { t0: t - 95, done: 5, out: 1830, tokSum: 1830, decS: 1830 / 61.8, wall: 29.6, overlapped: false, lastEnd: t - 0.4, lastPrompt: 40120 };
+        launch(SCEN.miss, t, endless);
+        break;
+      case 'decode': launch(SCEN.prose, t, endless); break;
+      case 'decode-multi':
+        // 3 条在解码，1 条刚读了大文件还在预填充
+        S.round = { t0: t - 40, done: 3, out: 960, tokSum: 960, decS: 31, wall: 9.1, overlapped: true, lastEnd: t - 1, lastPrompt: 9000 };
+        launch({ prompt: 9200,  cached: 9100,  out: 0, final: 66, accept: 72 }, t, endless);
+        launch({ prompt: 12400, cached: 12300, out: 0, final: 61, accept: 68 }, t, endless);
+        launch({ prompt: 7600,  cached: 7500,  out: 0, final: 70, accept: 74 }, t, endless);
+        launch({ prompt: 61000, cached: 2048,  out: 0, final: 60, accept: 66 }, t, endless);
+        break;
+      case 'queue':
+        S.round = { t0: t - 12, done: 2, out: 610, tokSum: 610, decS: 10, wall: 5.2, overlapped: true, lastEnd: t - 1, lastPrompt: 9000 };
+        for (let i = 0; i < 7; i++) launch({ prompt: 7000 + i * 600, cached: 6900 + i * 600, out: 0, final: 64, accept: 70 }, t, endless);
+        break;
+      case 'done':
+        S.last = { final: 97.2, out: 600, ttft: 0.09, prompt: 96, cached: 0, accept: 81, ctx: 696 };
+        S.hold = 'done';
+        break;
+      case 'round-rest':
+        S.round = { t0: t - 132, done: 7, out: 2345, tokSum: 2345, decS: 2345 / 62.3, wall: 37.6, overlapped: false, lastEnd: t, lastPrompt: 14300 };
+        S.last = { final: 71.4, out: 212, ttft: 0.41, prompt: 14300, cached: 13600, accept: 72, ctx: 14512 };
+        S.hold = 'round-rest';
+        break;
+      default: S.manual = false; S.demo = null;
     }
-    S.req.t0 = t;
-    setState('prefill');
+    syncButtons();
   }
 
   // ---------- 格式化 ----------
-  const nf = (n) => Math.round(n).toLocaleString('en-US');
-  // token 数：不到 1,000 显示原值；1,000–99,999 显示一位小数的 K（6.2K，保留 .0 让计数时宽度不跳）；10 万以上显示整数 K
-  const tokFmt = (n) => { n = Math.round(n); return n < 1000 ? String(n) : n < 99950 ? (n / 1000).toFixed(1) + 'K' : Math.round(n / 1000) + 'K'; };
-  const ctxFmt = tokFmt;
+  // token 数：不到 1,000 显示原值；1,000 以上一位小数的 K；10 万以上整数 K；100 万以上两位小数的 M，1000 万以上一位小数
+  const tokFmt = (n) => {
+    n = Math.round(n);
+    if (n < 1000) return String(n);
+    if (n < 99950) return (n / 1000).toFixed(1) + 'K';
+    if (n < 999500) return Math.round(n / 1000) + 'K';
+    if (n < 9995000) return (n / 1e6).toFixed(2) + 'M';
+    return (n / 1e6).toFixed(1) + 'M';
+  };
   const split1 = (x) => { const s = x.toFixed(1); const i = s.indexOf('.'); return [s.slice(0, i), s.slice(i)]; };
-
-  // ---------- 视图模型 ----------
+  const costOf = (d) => ((d.inp - d.cached) * PRICE.input + d.cached * PRICE.cached + d.out * PRICE.output) / 1e6;
+  const costFmt = (c) => c >= 100 ? '$' + Math.round(c) : '$' + c.toFixed(2);
   // 秒 / 分钟 / 小时，向下取整
   const durFmt = (sec) => {
     const x = Math.max(0, Math.floor(sec));
     return x < 60 ? `${x} 秒` : x < 3600 ? `${Math.floor(x / 60)} 分钟` : `${Math.floor(x / 3600)} 小时`;
   };
+  // 今日按太平洋时间算
+  const pacificDate = () => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'numeric', day: 'numeric' }).formatToParts(new Date());
+      const get = (type) => parts.find(p => p.type === type).value;
+      return `${get('month')}月${get('day')}日`;
+    } catch (e) { return '今日'; }
+  };
 
-  function view(t) {
+  // ---------- 视图模型 ----------
+  function view(t, st) {
+    const L = S.last, R = S.round;
+    const ENG = ENGINE[S.engine];
+    const dec = S.streams.filter(s => s.phase === 'decode');
+    const pre = S.streams.filter(s => s.phase === 'prefill');
+    const nWait = S.waiting.length;
+    const busy = S.streams.length + nWait > 0;
+    const mem = MEM_BASE + sum(S.streams, s => (s.filled + s.out) / CTX_MAX * MEM_LANE);
+    const memTxt = `内存 <b>${mem.toFixed(1)}</b> / ${MEM_TOTAL} GB`;
+    const memCard = { l: '内存', v: mem.toFixed(1), u: 'GB', f: `共 ${MEM_TOTAL} GB` };
+    // 一轮模式：本轮请求数（含进行中和排队的）≥ 2
+    const RM = !!R && R.done + S.streams.length + nWait >= 2;
+    const active = busy || (!!R && t - R.lastEnd <= roundGap);
+    const liveTok = sum(S.streams, s => s.emitted);
+    const liveOut = sum(S.streams, s => s.out);
+    // 本轮平均：没出现过并发 = 各请求输出 ÷ 各请求解码秒数（精确）；出现过并发 = 本轮输出 ÷ 有流在解码的时长
+    const avg = !R ? null
+      : R.overlapped ? (R.wall > 0.5 ? (R.tokSum + liveTok) / R.wall : null)
+      : (R.decS > 0 ? R.tokSum / R.decS : null);
+
     const V = {
-      state: S.state, stateName: '', stripLeft: MODEL, stripRight: '',
-      cap: '', pill: false, bigInt: '', bigDec: '', whole: false, unit: 'tok/s',
-      arc: 'rest', ghostF: v2f(S.last.final), rest: S.last.final, muted: false, spark: false,
-      ctx: null,       // 上下文已用 token 数（null = 不显示）
-      cards: [],
+      state: st, rm: RM && active, stateName: '', stripLeft: '', stripRight: '',
+      lanes: { dec: dec.length, pre: pre.length, wait: nWait, off: false,
+               max: S.engine === 'vllm' ? Math.min(LANES_DRAWN, Math.max(4, S.lanesPeak)) : LANES },
+      cap: '', unit: 'tok/s', pill: false, pillText: '精确', bigInt: '', bigDec: '', whole: false, bigClass: '',
+      arc: 'rest', scale: 'decode', ghostF: null, rest: null, pfSpeed: null,
+      muted: false, ctx: null, cards: [],
     };
-    const L = S.last;
-    const r = S.req;
-    const R = S.round;
-    const memCard = (m) => ({ l: '内存', v: m.toFixed(1), u: 'GB', f: `共 ${MEM_TOTAL} GB` });
-    const inFlight = S.state === 'prefill' || S.state === 'decode';
-    // 一轮模式：本轮请求数（含进行中的）≥ 2
-    const RM = !!R && R.requests + (inFlight ? 1 : 0) >= 2;
-    const active = inFlight || (R && t - R.lastEnd <= ROUND_GAP);
-    const avg = R && R.decS > 0 ? R.tokSum / R.decS : null;
 
     // 一轮模式的右侧三项（标签在本轮内不变）
     const roundCards = () => {
-      const n = R.requests + (inFlight ? 1 : 0);
-      const el = inFlight ? t - R.t0 : R.lastEnd - R.t0;
-      const curOut = S.state === 'decode' ? (r.sc.skip || 0) + r.emitted : 0;
+      const n = R.done + S.streams.length + nWait;
+      const el = busy ? t - R.t0 : R.lastEnd - R.t0;
       return [
-        { l: active ? '本轮请求' : '上轮请求', v: String(n), u: '次', f: `用时 ${durFmt(el)}` },
-        { l: active ? '累计输出' : '上轮输出', v: tokFmt(R.out + curOut), u: 'tok', f: '' },
-        avg !== null
-          ? { l: active ? '本轮平均' : '上轮平均', v: avg.toFixed(1), u: '', f: 'tok/s' }
-          : { l: active ? '本轮平均' : '上轮平均', v: '—', u: '', f: '', pending: true },
+        { l: '本轮请求', v: String(n), u: '次', f: `用时 ${durFmt(el)}` },
+        { l: '累计输出', v: tokFmt(R.out + liveOut), u: 'tok', f: '' },
+        avg !== null ? { l: '本轮平均', v: avg.toFixed(1), u: '', f: 'tok/s' }
+                     : { l: '本轮平均', v: '—', u: '', f: '', pending: true },
       ];
     };
 
-    // 不在解码时的灰色画面：一轮模式为本轮平均，否则为上次结果（即空闲画面）
-    const rest = () => {
+    // 一轮里不在解码时的灰色画面：本轮平均
+    const roundRest = () => {
       V.muted = true;
       V.arc = 'rest';
-      if (RM) {
-        V.cap = active ? '本轮平均' : '上轮平均';
-        V.pill = avg !== null;
-        if (avg !== null) [V.bigInt, V.bigDec] = split1(avg); else { V.bigInt = '—'; V.bigDec = ''; }
-        V.ghostF = avg !== null ? v2f(avg) : null;
-        V.rest = avg !== null ? avg : 0;
-        V.cards = roundCards();
-      } else {
-        V.cap = '上次平均'; V.pill = true;
-        [V.bigInt, V.bigDec] = split1(L.final);
-        V.cards = [
-          { l: '输出', v: tokFmt(L.out), u: 'tok', f: '' },
-          { l: '首字', v: L.ttft.toFixed(2), u: 's', f: '' },
-          memCard(L.mem),
-        ];
-      }
+      V.cap = '本轮平均';
+      V.pill = avg !== null && !R.overlapped;
+      if (avg !== null) [V.bigInt, V.bigDec] = split1(avg); else { V.bigInt = '—'; V.bigDec = ''; }
+      V.ghostF = avg !== null ? v2f(avg, 'decode') : null;
+      V.rest = avg;
+      V.cards = roundCards();
+      V.ctx = { kind: 'ctx', used: L.ctx };
     };
 
-    switch (S.state) {
+    // 今日统计（空闲画面）
+    const today = () => {
+      const d = S.today;
+      // 模型名后面标出引擎；标了“外挂未生效”就不再写引擎名（只有 TensorFold 有外挂，位置也不够）
+      const hookWarn = S.engine === 'tensorfold' && !S.hook;
+      V.stripLeft = hookWarn ? MODEL : `${MODEL} · ${ENG.name}`;
+      V.stripRight = (hookWarn ? '<span class="warn">外挂未生效</span> · ' : '') + memTxt;
+      V.cap = '今日费用'; V.unit = '美元';
+      const s = costFmt(costOf(d));
+      const i = s.indexOf('.');
+      V.bigInt = i < 0 ? s : s.slice(0, i);
+      V.bigDec = i < 0 ? '' : s.slice(i);
+      V.whole = true; V.bigClass = 'cost';
+      V.arc = 'blank';
+      V.ctx = { kind: 'note', html: `${pacificDate()} · 太平洋时间` };
+      V.cards = [
+        { l: '今日输入', v: tokFmt(d.inp), u: 'tok', f: `缓存命中 ${d.inp ? Math.round(d.cached / d.inp * 100) : 0}%` },
+        { l: '今日输出', v: tokFmt(d.out), u: 'tok', f: '' },
+        { l: '今日请求', v: String(d.req), u: '次', f: `上次 ${L.final.toFixed(1)} tok/s` },
+      ];
+    };
+
+    switch (st) {
       case 'offline': {
         V.stateName = '引擎离线';
-        V.stripLeft = `上次模型 ${MODEL}`;
+        V.stripRight = `上次模型 ${MODEL} · ${ENG.name}`;
+        V.lanes.off = true;
         V.arc = 'off';
         const secs = Math.floor(t - S.offlineSince);
         const off = secs < 60 ? { v: String(secs), u: '秒' } : { v: String(Math.floor(secs / 60)), u: '分钟' };
         V.cards = [
-          { l: '上次平均', v: L.final.toFixed(1), u: '', f: 'tok/s' },
+          { l: '今日费用', v: costFmt(costOf(S.today)), u: '', f: '' },
           { l: '已离线', v: off.v, u: off.u, f: '' },
-          { l: '内存', v: '7.9', u: 'GB', f: `共 ${MEM_TOTAL} GB` },
+          { l: '内存', v: '9.3', u: 'GB', f: `共 ${MEM_TOTAL} GB` },
         ];
         break;
       }
       case 'idle': {
         V.stateName = '空闲';
-        rest();
+        // 一轮中间的空隙显示本轮统计；一轮结束后才是今日统计
+        if (RM && active) { roundRest(); V.stripRight = memTxt; } else today();
         break;
       }
       case 'prefill': {
-        const el = t - r.t0;
-        V.stateName = '预填充中';
-        rest();
-        // 缓存命中：预填充一开始就有（add_stream 的 cached_tokens）
-        const P = r.sc.prompt, C = r.sc.cached, N = P - C;
+        const el = t - Math.min(...pre.map(s => s.start));
+        const P = sum(pre, s => s.prompt), C = sum(pre, s => s.cached), N = P - C;
         const hit = P ? Math.round(C / P * 100) : 0;
-        const est = prefillEst(C, N);
-        // 缓存未命中：本轮上一个请求的提示够长，这次提示和它差不多长（同一段对话接着来），
-        // 却连它的一半都没命中，且要新算的不少（排除代理顺手发的短请求，比如起标题）
-        const prev = RM && R.requests >= 1 ? R.lastPrompt : null;
-        const miss = prev != null && prev >= MISS_MIN && P >= prev * 0.5 && C < prev * 0.5 && N >= MISS_MIN;
-        if (el < PREFILL_SHORT && est < PREFILL_SHORT && !miss) {
-          // 短预填充：画面保持不变，只有状态条变化
+        const est = N / ENG.pfAvg;
+        // vLLM 读不到进度：已算 = 缓存命中 + 新算 × 已用时 ÷ 预计时间，最多到 99%
+        const estMode = S.engine === 'vllm';
+        const F = estMode ? C + N * Math.min(0.99, est > 0 ? el / est : 1) : sum(pre, s => s.filled);
+        // 缓存未命中：本轮没出现过并发，上一个请求的提示够长，这次提示和它差不多长，却连它的一半都没命中，且新算的不少
+        const prev = RM && R.done >= 1 && !R.overlapped ? R.lastPrompt : null;
+        const miss = S.hook && prev != null && prev >= MISS_MIN && P >= prev * 0.5 && C < prev * 0.5 && N >= MISS_MIN;
+        const take = S.hook ? (el >= PREFILL_SHORT || est >= PREFILL_SHORT || miss) : el >= PREFILL_SHORT;
+        if (!take) {
+          // 短预填充：画面保持之前的样子，只有状态条和流指示点变化
+          if (S.restKind === 'today' || !RM) today(); else roundRest();
+          V.stateName = '预填充中';
+          V.stripLeft = '';
           V.stripRight = `已用时 <b>${el.toFixed(1)}</b> s`;
           break;
         }
-        // 长预填充（已过 3 秒或预计超过 3 秒）：主数字换成已用秒数；圆弧不动，小点留在原位
-        V.muted = false;
-        const eta = `预计约 <b>${Math.ceil(est)}</b> s`;
+        V.stateName = '预填充中';
+        const elTxt = el < 100 ? el.toFixed(1) : String(Math.floor(el));
+        if (!S.hook) {
+          // 外挂失效：没有缓存命中和进度，退回“已用时”
+          V.cap = '已用时'; V.unit = '秒'; V.whole = true;
+          if (el < 10) [V.bigInt, V.bigDec] = split1(el); else { V.bigInt = String(Math.floor(el)); V.bigDec = ''; }
+          V.arc = 'rest'; V.ghostF = v2f(S.display, 'decode');
+          V.stripRight = '提示较长，可能需要几秒';
+          V.ctx = { kind: 'ctx', used: Math.max(...pre.map(s => s.prompt)) };
+          V.cards = RM ? roundCards() : [
+            { l: '输出', v: '—', u: '', f: '', pending: true },
+            { l: '首字', v: '—', u: '', f: '等待首个 token', pending: true },
+            memCard,
+          ];
+          break;
+        }
+        // 实时预填充速度：各条流最近算完的一块的速度之和；第一块算完之前没有
+        // vLLM：主数字是最近几次请求的平均预填充速度，本次预填充期间不变，标“近期平均”
+        const speeds = pre.filter(s => s.pfSpeed !== null);
+        const sp = estMode ? ENG.pfAvg : speeds.length ? sum(speeds, s => s.pfSpeed) : null;
+        const rem = Math.max(1, Math.ceil(sp && !estMode ? (P - F) / sp : est - el));
+        V.cap = '预填充速度'; V.unit = 'tok/s';
+        if (estMode) { V.pill = true; V.pillText = '近期平均'; }
+        V.arc = 'prefill'; V.scale = 'prefill'; V.pfSpeed = sp;
+        V.bigInt = sp !== null ? String(Math.round(sp)) : '—';
+        V.bigClass = 'four';
+        V.ctx = { kind: 'prog', frac: P ? F / P : 0, html: `${estMode ? '已算约' : '已算'} <b>${tokFmt(F)}</b> / ${tokFmt(P)}` };
         const hitTxt = miss ? '<span class="warn">缓存未命中</span>' : `缓存命中 <b>${hit}%</b>`;
-        V.stripRight = RM ? `${hitTxt} · 新算 <b>${tokFmt(N)}</b> · ${eta}`
-                          : `新算 <b>${tokFmt(N)}</b> tok · ${eta}`;
-        V.cap = '已用时'; V.pill = false;
-        V.whole = true;
-        if (el < 10) { [V.bigInt, V.bigDec] = split1(el); } else { V.bigInt = String(Math.floor(el)); V.bigDec = ''; }
-        V.unit = '秒';
-        if (!RM) {
-          const grow = Math.min(1, el / r.sc.ttft);
+        if (RM) {
+          V.cards = roundCards();
+          V.stripRight = `已用时 <b>${elTxt}</b> s · ${hitTxt} · 剩余约 <b>${rem}</b> s`;
+        } else {
           V.cards = [
             { l: '缓存命中', v: String(hit), u: '%', f: `${tokFmt(C)} / ${tokFmt(P)}` },
-            { l: '首字', v: '—', u: '', f: '等待首个 token', pending: true },
-            memCard(r.memStart + (r.sc.mem - r.memStart) * grow),
+            { l: '已等待', v: elTxt, u: 's', f: `剩余约 ${rem} s` },
+            memCard,
           ];
+          V.stripRight = `新算 <b>${tokFmt(N)}</b> tok`;
         }
         break;
       }
       case 'decode': {
         V.stateName = '解码中';
-        V.stripRight = `首字 <b>${r.sc.ttft.toFixed(2)}</b> s · 内存 <b>${(r.sc.mem + r.emitted * 0.00002).toFixed(1)}</b> / ${MEM_TOTAL} GB`;
         V.cap = '解码速度';
-        V.bigInt = String(Math.round(S.display)); V.bigDec = '';
+        V.bigInt = S.bigShown; V.bigDec = '';
         V.arc = 'value';
-        V.cards = RM ? roundCards() : [
-          { l: '输出', v: tokFmt((r.sc.skip || 0) + r.emitted), u: 'tok', f: '' },
-          // 本次平均：首字之后的输出 tokens ÷ 首字之后经过的时间（和引擎最终 tok/s 同一算法），前 0.5 秒不显示
-          (() => { const el = t - r.decodeStart; return el >= 0.5 ? { l: '平均', v: (r.emitted / el).toFixed(1), u: '', f: 'tok/s' } : { l: '平均', v: '—', u: '', f: '', pending: true }; })(),
-          { l: '峰值', v: r.peak > 0 ? String(Math.round(r.peak)) : '—', u: r.peak > 0 ? 'tok/s' : '', f: '', pending: !(r.peak > 0) },
-        ];
+        if (S.streams.length >= 2 || nWait > 0) {
+          const parts = [`解码 <b>${dec.length}</b>`];
+          if (pre.length) parts.push(`预填充 <b>${pre.length}</b>`);
+          if (nWait) parts.push(`排队 <b>${nWait}</b>`);
+          parts.push(memTxt);
+          V.stripRight = parts.join(' · ');
+        } else {
+          V.stripRight = `首字 <b>${dec[0].ttft.toFixed(2)}</b> s · ${memTxt}`;
+        }
+        if (RM) V.cards = roundCards();
+        else {
+          const s = dec[0], el = t - s.decodeStart;
+          V.cards = [
+            { l: '输出', v: tokFmt(s.out), u: 'tok', f: '' },
+            // 平均：首字之后的输出 ÷ 首字之后经过的时间，前 0.5 秒不显示
+            el >= 0.5 ? { l: '平均', v: (s.emitted / el).toFixed(1), u: '', f: 'tok/s' } : { l: '平均', v: '—', u: '', f: '', pending: true },
+            { l: '峰值', v: S.peak > 0 ? String(Math.round(S.peak)) : '—', u: S.peak > 0 ? 'tok/s' : '', f: '', pending: !(S.peak > 0) },
+          ];
+        }
+        // 上下文条：占用最大的那条流
+        V.ctx = { kind: 'ctx', used: Math.max(...S.streams.map(s => s.prompt + s.out)) };
         break;
       }
       case 'done': {
+        if (RM) {
+          roundRest();
+          V.stateName = '完成';
+          V.stripRight = R.overlapped ? memTxt : `首字 <b>${L.ttft.toFixed(2)}</b> s`;
+          break;
+        }
         V.stateName = '完成';
-        V.stripRight = `首字 <b>${L.ttft.toFixed(2)}</b> s`;   // 上下文已在仪表下方
-        if (RM) { rest(); break; }
+        V.stripRight = `首字 <b>${L.ttft.toFixed(2)}</b> s`;
         V.cap = '平均速度'; V.pill = true;
         [V.bigInt, V.bigDec] = split1(L.final);
-        V.arc = 'value';
+        V.arc = 'value'; V.rest = L.final;
         const hit = L.prompt ? Math.round(L.cached / L.prompt * 100) : 0;
         V.cards = [
           { l: '输出', v: tokFmt(L.out), u: 'tok', f: `提示 ${tokFmt(L.prompt)} tok` },
           { l: '缓存命中', v: String(hit), u: '%', f: `${tokFmt(L.cached)} tok` },
           { l: '接受率', v: String(L.accept), u: '%', f: '' },
         ];
+        V.ctx = { kind: 'ctx', used: L.ctx };
         break;
       }
     }
-    // 上下文：预填充 = 提示长度（render 钩子，准确）；解码 = 提示 + 已输出；完成 / 空闲 = 上次的 prompt + completion
-    if (S.state === 'prefill') V.ctx = r.sc.prompt;
-    else if (S.state === 'decode') V.ctx = r.sc.prompt + (r.sc.skip || 0) + r.emitted;
-    else if (S.state === 'done' || S.state === 'idle') V.ctx = L.ctx;
-    if (V.ctx !== null) V.ctx = Math.min(CTX_MAX, V.ctx + S.ctxExtra);
+    // 记住“预填充之前画面是什么”，短预填充时保持它
+    if (st === 'idle' || st === 'offline') S.restKind = (st === 'idle' && RM && active) ? 'round' : 'today';
+    else if (st === 'done' || st === 'decode') S.restKind = 'round';
     return V;
   }
 
@@ -939,45 +1116,24 @@
     scr.cache[cacheKey] = val;
     el.setAttribute(attr, val);
   }
-
-  function sparkPoints(key) {
-    const n = S.spark.length;
-    if (n < 2) return '';
-    const W = 120, H = 26;
-    const step = W / 79;
-    const x0 = W - (n - 1) * step;
-    let s = '';
-    for (let i = 0; i < n; i++) {
-      const v = v2f(S.spark[i][key]);   // 与仪表同一非线性刻度
-      s += (x0 + i * step).toFixed(1) + ',' + (H - 1.5 - v * (H - 3)).toFixed(1) + ' ';
-    }
-    return s;
-  }
-
   // 重新触发一次淡入动画
   function fadeIn(el, slow) {
     el.classList.remove('swap', 'swap-slow');
-    void el.offsetWidth;
+    void el.getBoundingClientRect();
     el.classList.add(slow ? 'swap-slow' : 'swap');
   }
 
   function apply(V) {
-    const slow = S.swap === 'swap-slow'; S.swap = null;
+    const slow = S.slow; S.slow = false;
     // 淡入键：中间看标题 / 单位 / 灰色，右侧看三张卡片的标签，状态条看状态名
     const keys = {
       center: [V.cap, V.unit, V.whole, V.muted, V.state === 'offline'].join('|'),
       stats: V.cards.map(c => c.l).join('|'),
       strip: V.stateName,
     };
-    const f = v2f(S.display);
-    const rawPts = V.spark ? sparkPoints('raw') : null;
-    const smPts = V.spark ? sparkPoints('smooth') : null;
+    const laneKey = V.lanes.off ? 'off' : `${V.lanes.dec},${V.lanes.pre},${V.lanes.wait},${V.lanes.max}`;
     for (const scr of screens) {
       const root = scr.root;
-      if (scr.cache.theme !== theme) {
-        scr.cache.theme = theme;
-        root.classList.toggle('theme-beige', theme === 'beige');
-      }
       if (root.dataset.state !== V.state) root.dataset.state = V.state;
       const muted = V.muted ? '1' : '0';
       if (root.dataset.muted !== muted) root.dataset.muted = muted;
@@ -986,55 +1142,82 @@
         if (scr.cache[ck] !== undefined && scr.cache[ck] !== keys[part]) fadeIn(scr[part], slow);
         scr.cache[ck] = keys[part];
       }
+      // 流指示点
+      if (scr.cache.lanes !== laneKey) {
+        scr.cache.lanes = laneKey;
+        scr.lanes.classList.toggle('off', V.lanes.off);
+        scr.laneEls.forEach((el, i) => {
+          el.style.display = (i < V.lanes.max && !(V.lanes.off && i > 0)) ? '' : 'none';
+          el.classList.toggle('dec', !V.lanes.off && i < V.lanes.dec);
+          el.classList.toggle('pre', !V.lanes.off && i >= V.lanes.dec && i < V.lanes.dec + V.lanes.pre);
+        });
+        scr.queue.textContent = !V.lanes.off && V.lanes.wait ? `+${V.lanes.wait}` : '';
+      }
       setText(scr, 'stateName', V.stateName);
       setText(scr, 'stripLeft', V.stripLeft);
       setText(scr, 'stripRight', V.stripRight, true);
-      // 标题行 = 标题 · 单位（单位不再单独占一行）
+      // 标题行 = 标题 · 单位
       setText(scr, 'cap', V.cap && V.unit ? `${V.cap} · ${V.unit}` : V.cap);
       setText(scr, 'bigInt', V.bigInt);
       setText(scr, 'bigDec', V.bigDec);
-      setText(scr, 'unit', V.unit);
       if (scr.cache.pill !== V.pill) { scr.cache.pill = V.pill; scr.pill.classList.toggle('on', V.pill); }
+      if (scr.cache.pillText !== V.pillText) {
+        scr.cache.pillText = V.pillText;
+        scr.pill.textContent = V.pillText;
+        scr.pill.classList.toggle('est', V.pillText !== '精确');
+      }
       if (scr.cache.whole !== V.whole) { scr.cache.whole = V.whole; scr.big.classList.toggle('whole', V.whole); }
+      if (scr.cache.bigClass !== V.bigClass) {
+        scr.cache.bigClass = V.bigClass;
+        scr.big.classList.toggle('four', V.bigClass === 'four');
+        scr.big.classList.toggle('cost', V.bigClass === 'cost');
+      }
       if (scr.gauge.dataset.arc !== V.arc) scr.gauge.dataset.arc = V.arc;
-
+      // 刻度：解码一套、预填充一套，切换时淡入
+      if (scr.cache.scale !== V.scale) {
+        const first = scr.cache.scale === undefined;
+        scr.cache.scale = V.scale;
+        scr.tickEls.forEach((el, i) => { el.textContent = SCALE[V.scale].labels[i]; });
+        if (!first) fadeIn(scr.ticks, false);
+      }
       // 数值弧
-      setAttr(scr, 'valDash', scr.value, 'stroke-dasharray', `${(f * 1000).toFixed(1)} 2000`);
-      // 空闲时的「上次位置」小点
+      setAttr(scr, 'valDash', scr.value, 'stroke-dasharray', `${(S.frac * 1000).toFixed(1)} 2000`);
+      // 灰色画面里的“平均值位置”小点
       const g = Math.max(0, (V.ghostF ?? 0) * 1000 - 0.5);
       setAttr(scr, 'ghostDash', scr.ghost, 'stroke-dasharray', V.ghostF === null ? '0 3000' : '1 3000');
       setAttr(scr, 'ghostOff', scr.ghost, 'stroke-dashoffset', (-g).toFixed(1));
-      // 上下文条
-      const ctxOn = V.ctx !== null;
+      // 主数字下方：上下文条 / 预填充进度条 / 说明
+      const c = V.ctx;
+      const ctxOn = !!c;
       if (scr.cache.ctxOn !== ctxOn) { scr.cache.ctxOn = ctxOn; scr.ctx.classList.toggle('on', ctxOn); }
       if (ctxOn) {
-        const frac = V.ctx / CTX_MAX;
+        let frac = 0, txt = c.html;
+        if (c.kind === 'ctx') {
+          const used = Math.min(CTX_MAX, c.used + S.ctxExtra);
+          frac = used / CTX_MAX;
+          txt = `上下文 <b>${tokFmt(used)}</b> / ${tokFmt(CTX_MAX)}`;
+        } else if (c.kind === 'prog') frac = c.frac;
+        scr.ctx.classList.toggle('prog', c.kind === 'prog');
+        scr.ctx.classList.toggle('note', c.kind === 'note');
+        scr.ctx.classList.toggle('warn', c.kind === 'ctx' && frac >= 0.8 && frac < 0.95);
+        scr.ctx.classList.toggle('full', c.kind === 'ctx' && frac >= 0.95);
         setAttr(scr, 'ctxW', scr.ctxFill, 'style', `width:${(frac * 100).toFixed(1)}%`);
-        scr.ctx.classList.toggle('warn', frac >= 0.8 && frac < 0.95);
-        scr.ctx.classList.toggle('full', frac >= 0.95);
-        const txt = `上下文 <b>${ctxFmt(V.ctx)}</b> / ${ctxFmt(CTX_MAX)}`;
         if (scr.cache.ctxT !== txt) { scr.cache.ctxT = txt; scr.ctxText.innerHTML = txt; }
       }
-      // 小曲线
-      const sparkOn = V.spark && S.showSpark;
-      if (scr.cache.spark !== sparkOn) { scr.cache.spark = sparkOn; scr.spark.classList.toggle('on', sparkOn); }
-      if (sparkOn) {
-        setAttr(scr, 'sr', scr.sparkRaw, 'points', rawPts);
-        setAttr(scr, 'ss', scr.sparkSmooth, 'points', smPts);
-      }
       // 卡片
-      V.cards.forEach((c, i) => {
-        setText(scr, 'l' + i, c.l);
-        setText(scr, 'v' + i, c.v);
-        setText(scr, 'u' + i, c.u);
-        setText(scr, 'f' + i, c.f);
-        const pend = !!c.pending;
+      V.cards.forEach((card, i) => {
+        setText(scr, 'l' + i, card.l);
+        setText(scr, 'v' + i, card.v);
+        setText(scr, 'u' + i, card.u);
+        setText(scr, 'f' + i, card.f);
+        const pend = !!card.pending;
         if (scr.cache['p' + i] !== pend) { scr.cache['p' + i] = pend; scr.vals[i].classList.toggle('pending', pend); }
       });
     }
   }
 
   // ---------- 主循环 ----------
+  const roLanes = document.getElementById('roLanes');
   const roRaw = document.getElementById('roRaw');
   const roSmooth = document.getElementById('roSmooth');
   const roShown = document.getElementById('roShown');
@@ -1044,72 +1227,127 @@
     const t = now();
     const dt = Math.min(0.1, t - S.lastFrame);
     S.lastFrame = t;
-    const r = S.req;
 
-    if (S.state === 'prefill' && r && !r.endless && t >= r.t0 + r.sc.ttft) {
-      beginDecode(r.t0 + r.sc.ttft);
+    // 待发起的请求
+    for (let i = S.sched.length - 1; i >= 0; i--) {
+      if (t >= S.sched[i].at) { const { sc } = S.sched.splice(i, 1)[0]; launch(sc, t); }
     }
 
-    let target = null;
-    if (S.state === 'decode' && r) {
-      while (t >= r.nextRound && (r.endless || r.emitted < r.sc.out - (r.sc.skip || 0))) emitRound(r, r.nextRound);
+    // vLLM：引擎算完第一步，请求才出现在面板能读到的指标里
+    if (S.hidden.length) {
+      const due = S.hidden.filter(s => t >= s.t0 + s.lag);
+      if (due.length) {
+        S.hidden = S.hidden.filter(s => !due.includes(s));
+        for (const s of due) reveal(s, t);
+      }
+    }
+    S.lanesPeak = Math.max(S.lanesPeak, S.streams.length);
+
+    // 预填充：引擎把时间分给正在预填充的流；有流在解码时预填充变慢。进度每算完一块（2048 token）才更新
+    const pre = S.streams.filter(s => s.phase === 'prefill');
+    const nDec = S.streams.length - pre.length;
+    if (pre.length) {
+      const speed = ENGINE[S.engine].pf * (nDec ? PF_SHARED : 1) / pre.length;
+      for (const s of pre) {
+        if (t < s.admitAt + 0.06) continue;
+        const need = s.prompt - s.cached;
+        s.prog += speed * s.jit * dt;
+        if (s.prog >= need) {
+          if (!s.endless || need < CHUNK * 4) { beginDecode(s, t); continue; }
+          s.prog = 0; s.lastFilled = s.cached; s.stepAt = t;       // 手动停住：从头再来
+          if (S.engine === 'vllm') s.start = t;                    // 估算的进度按时间走，起点也要跟着重来
+        }
+        const filled = s.cached + Math.min(need, Math.floor(s.prog / CHUNK) * CHUNK);
+        if (filled > s.lastFilled) {
+          s.pfSpeed = (filled - s.lastFilled) / Math.max(0.05, t - s.stepAt);
+          s.lastFilled = filled; s.stepAt = t;
+        }
+        s.filled = filled;
+      }
+    }
+
+    // 解码：各条流各自吐 token，合计进同一个事件列表
+    const decoding = S.streams.filter(s => s.phase === 'decode');
+    for (const s of decoding) {
+      const total = s.sc.out - (s.sc.skip || 0);
+      while (t >= s.nextRound && (s.endless || s.emitted < total)) emitRound(s, s.nextRound, decoding.length);
+    }
+    for (const s of decoding) {
+      if (!s.endless && s.emitted >= s.sc.out - (s.sc.skip || 0)) finish(s, t);
+    }
+
+    if (S.hold === 'round-rest' && S.round) S.round.lastEnd = t;
+
+    // 画面状态
+    const st = screenState(t);
+    if (st !== S.prevState) {
+      if (st === 'decode') { S.decStart = t; S.peak = 0; S.events = []; S.bigAt = 0; }
+      S.slow = S.prevState === 'done' && st === 'idle';
+      S.prevState = st;
+    }
+
+    // 合计解码速度：最近 2.5 秒内的产出 ÷ 2.5 秒（开头不足 2.5 秒时按已用时间算，最少按 0.5 秒）
+    if (st === 'decode') {
       const cut = t - 10;
-      while (r.events.length && r.events[0][0] < cut) r.events.shift();
+      while (S.events.length && S.events[0][0] < cut) S.events.shift();
       let inWin = 0, in1 = 0;
-      for (let i = r.events.length - 1; i >= 0; i--) {
-        const [et, k] = r.events[i];
+      for (let i = S.events.length - 1; i >= 0; i--) {
+        const [et, k] = S.events[i];
         if (et <= t - WINDOW) break;
         inWin += k;
         if (et > t - 1) in1 += k;
       }
-      const el = t - r.decodeStart;
-      r.smooth = inWin / Math.max(0.5, Math.min(WINDOW, el));
-      r.raw = in1 / Math.max(0.25, Math.min(1, el));
-      if (el > 1.0) r.peak = Math.max(r.peak, r.smooth);
-      // 草稿接受率：随时间收敛到最终值
-      if (t - r.accAt > 0.6) {
-        r.accAt = t;
-        const spread = Math.max(1.5, 9 * (1 - el / 6));
-        r.acc = r.sc.accept + rand(-spread, spread);
-      }
-      if (t - S.sparkAt >= 0.1) {
-        S.sparkAt = t;
-        S.spark.push({ raw: r.raw, smooth: r.smooth });
-        if (S.spark.length > 80) S.spark.shift();
-      }
-      target = r.smooth;
-      if (!r.endless && r.emitted >= r.sc.out - (r.sc.skip || 0)) finishRequest(t);
-    } else if (S.state === 'done') {
-      if (!S.manual && t - S.since > DONE_HOLD) setState('idle', { slow: true });
+      const el = t - S.decStart;
+      S.smooth = inWin / Math.max(0.5, Math.min(WINDOW, el));
+      S.raw = in1 / Math.max(0.25, Math.min(1, el));
+      if (el > 1.0) S.peak = Math.max(S.peak, S.smooth);
+      if (S.round) S.round.wall += dt;
     }
 
-    // 模拟编程代理：每次完成后隔 0.3–4 秒发下一次（第 6 次后隔 8 秒，能看到一轮里的空闲）
-    if (S.agent && !S.manual && (S.state === 'done' || S.state === 'idle')) {
+    // 模拟编程代理：每次完成后隔 0.3–4 秒发下一次（第 6 次后隔 5 秒，能看到一轮里的空隙）
+    const busy = S.streams.length + S.waiting.length + S.hidden.length > 0;
+    if (S.agent && !S.manual && !busy) {
       const a = S.agent;
-      if (a.nextAt === 0) a.nextAt = t + (a.i === 6 ? 8 : rand(0.3, 4));
-      if (t >= a.nextAt) { if (a.i < a.n) agentStep(); else S.agent = null; }
+      if (a.nextAt === 0) a.nextAt = t + (a.i === 6 ? 5 : rand(0.3, 4));
+      if (t >= a.nextAt) { if (a.i < a.n) agentStep(t); else S.agent = null; }
     }
+    if (S.multi && !busy && !S.sched.length) S.multi = null;
 
-    const V = view(t);
-    // 不在解码时，缓动值停在画面上的灰色主数字处，解码开始时从这里缓动到实时速度
-    if (target === null) target = V.arc === 'value' ? S.last.final : (V.arc === 'rest' ? V.rest : 0);
-    S.display += (target - S.display) * (1 - Math.exp(-dt / EASE_TAU));
+    // 大数字：解码时显示缓动值，每秒最多刷新 4 次
+    if (st === 'decode' && t - S.bigAt >= 0.25) { S.bigShown = String(Math.round(S.display)); S.bigAt = t; }
+
+    const V = view(t, st);
+
+    // 缓动：数字在速度值上缓动，圆弧在位置上缓动（两套刻度之间也能平滑过渡）。
+    // 不在解码时数值停在画面上的灰色主数字处，解码开始时从这里缓动到实时速度
+    let target = S.display;
+    if (st === 'decode') target = S.smooth;
+    else if (V.rest !== null) target = V.rest;
+    const k = 1 - Math.exp(-dt / EASE_TAU);
+    S.display += (target - S.display) * k;
     if (Math.abs(S.display - target) < 0.02) S.display = target;
+    let targetF = S.frac;
+    if (V.arc === 'prefill') targetF = v2f(V.pfSpeed || 0, 'prefill');
+    else if (V.arc === 'value' || V.arc === 'rest') targetF = v2f(target, 'decode');
+    S.frac += (targetF - S.frac) * k;
+    if (Math.abs(S.frac - targetF) < 0.0005) S.frac = targetF;
 
-    if (S.state === 'idle' && S.autoLoop && !S.manual && !S.agent) {
-      if (t >= S.loopNextAt) { startRequest(document.getElementById('scenario').value); }
-    } else if (S.state !== 'idle') {
-      S.loopNextAt = t + rand(3, 5);
+    // 连续循环：回到今日统计后隔几秒发起下一次
+    if (st === 'idle' && !V.rm && S.autoLoop && !S.manual && !S.agent && !S.multi && !S.sched.length && !S.hidden.length) {
+      if (t >= S.loopNextAt) startRequest(KIOSK ? 'auto' : document.getElementById('scenario').value);
+    } else {
+      S.loopNextAt = t + rand(4, 6);
     }
 
     apply(V);
 
     if (!KIOSK && t - roAt > 0.1) {
       roAt = t;
-      const live = S.state === 'decode' && r;
-      roRaw.textContent = live ? `${r.raw.toFixed(1)} tok/s` : '—';
-      roSmooth.textContent = live ? `${r.smooth.toFixed(1)} tok/s` : '—';
-      roShown.textContent = (S.state === 'decode' || S.state === 'done') ? `${S.display.toFixed(1)} tok/s` : '—';
+      const live = st === 'decode';
+      roLanes.textContent = `解码 ${V.lanes.dec} · 预填充 ${V.lanes.pre} · 排队 ${V.lanes.wait}`;
+      roRaw.textContent = live ? `${S.raw.toFixed(1)} tok/s` : '—';
+      roSmooth.textContent = live ? `${S.smooth.toFixed(1)} tok/s` : '—';
+      roShown.textContent = live ? `${S.display.toFixed(1)} tok/s` : '—';
     }
     requestAnimationFrame(frame);
   }
@@ -1117,20 +1355,25 @@
   // ---------- 控制面板 ----------
   function syncButtons() {
     if (KIOSK) return;
-    document.querySelectorAll('[data-set-state]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.setState === S.state)));
-    document.querySelectorAll('[data-set-theme]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.setTheme === theme)));
+    document.querySelectorAll('[data-demo]').forEach(b => b.setAttribute('aria-pressed', String(S.manual && b.dataset.demo === S.demo)));
   }
-  function setTheme(th) {
-    theme = th;
-    try { if (!KIOSK) localStorage.setItem('dock-dash-theme', th); } catch (e) {}
-    syncButtons();
+  function setHook(on) {
+    S.hook = on;
+    const chk = document.getElementById('hookChk');
+    if (chk) chk.checked = !on;
+  }
+  // 换引擎：相当于引擎重启，流指示点回到起步的个数
+  function setEngine(name) {
+    if (S.engine !== name) { S.engine = name; S.lanesPeak = 0; }
+    const sel = document.getElementById('engineSel');
+    if (sel) sel.value = name;
   }
 
   if (KIOSK) {
     document.body.classList.add('kiosk');
     const m = document.getElementById('mountKiosk');
     const fit = () => {
-      // 等比铺满窗口（可放大也可缩小）；用 zoom 而不是 transform，放大后文字按新尺寸重新渲染，保持清晰
+      // 等比铺满窗口；用 zoom 而不是 transform，放大后文字按新尺寸重新渲染，保持清晰
       const s = Math.min(window.innerWidth / 480, window.innerHeight / 320);
       m.style.zoom = String(s);
     };
@@ -1139,23 +1382,25 @@
     let hideT;
     const wake = () => { document.body.classList.remove('hide-cursor'); clearTimeout(hideT); hideT = setTimeout(() => document.body.classList.add('hide-cursor'), 1500); };
     window.addEventListener('mousemove', wake); wake();
-    window.addEventListener('keydown', (e) => { if (e.key === 't' || e.key === 'T') setTheme(theme === 'dark' ? 'beige' : 'dark'); });
-    S.autoLoop = true;
   } else {
-    document.querySelectorAll('[data-set-state]').forEach(b => b.addEventListener('click', () => manualState(b.dataset.setState)));
-    document.querySelectorAll('[data-set-theme]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.setTheme)));
-    document.querySelectorAll('[data-cache-demo]').forEach(b => b.addEventListener('click', () => cacheDemo(b.dataset.cacheDemo)));
+    document.querySelectorAll('[data-demo]').forEach(b => b.addEventListener('click', () => demo(b.dataset.demo)));
     document.getElementById('simBtn').addEventListener('click', () => startRequest(document.getElementById('scenario').value));
     document.getElementById('loopChk').addEventListener('change', (e) => {
       S.autoLoop = e.target.checked;
-      if (S.autoLoop) {
-        S.manual = false; S.loopNextAt = now() + 0.5;
-        if (S.state !== 'idle' && (!S.req || S.req.endless || S.state === 'done')) { S.req = null; setState('idle'); }
-      }
+      if (S.autoLoop && S.manual) { resetSim(); S.manual = false; S.demo = null; syncButtons(); }
+    });
+    document.getElementById('fastChk').addEventListener('change', (e) => { roundGap = e.target.checked ? 8 : 60; });
+    document.getElementById('hookChk').addEventListener('change', (e) => { S.hook = !e.target.checked; });
+    document.getElementById('engineSel').addEventListener('change', (e) => {
+      resetSim(); S.manual = false; S.demo = null;
+      setEngine(e.target.value);
+      syncButtons();
     });
     document.getElementById('ctxLongChk').addEventListener('change', (e) => { S.ctxExtra = e.target.checked ? 200000 : 0; });
   }
 
+  setEngine(S.engine);
+  if (DEMO) demo(DEMO);
   syncButtons();
   requestAnimationFrame(frame);
 })();

@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "state": "decode",
+  "hook": "ok",
+  "engine": "tensorfold",
+  "model": "Qwen3.8-Flash-Next",
+  "context_max": 262144,
+  "lanes": {
+    "max": 5,
+    "decoding": 5,
+    "prefilling": 0,
+    "waiting": 2
+  },
+  "decode": {
+    "tps": 136.4,
+    "tps_peak": 141.0,
+    "tps_avg": 128.9,
+    "output_tokens": 790,
+    "ttft_s": null
+  },
+  "prefill": null,
+  "context_used": 9480,
+  "last": {
+    "prompt_tokens": 58,
+    "cached_tokens": 0,
+    "completion_tokens": 570,
+    "decode_tps": 63.6,
+    "prefill_tps": 704.0,
+    "ttft_s": 0.07,
+    "acceptance_rate": 0.7,
+    "context_used": 628
+  },
+  "round": {
+    "requests": 2,
+    "running": 7,
+    "output_tokens": 1400,
+    "decode_tps_avg": 128.2,
+    "exact": false,
+    "elapsed_s": 17.4,
+    "active": true
+  },
+  "today": {
+    "date": "2026-10-03",
+    "prompt_tokens": 8260391,
+    "cached_tokens": 5443627,
+    "completion_tokens": 185305,
+    "requests": 98,
+    "cost": 0.597
+  },
+  "memory": {
+    "used_gb": 94.9,
+    "total_gb": 121.6
+  },
+  "offline_s": null
+}

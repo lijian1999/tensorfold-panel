@@ -1,0 +1,20 @@
+{
+ "running": 0,
+ "waiting": 0,
+ "queries": 188435,
+ "hits": 35904,
+ "prompt": 162775,
+ "prompt_cached": 35904,
+ "ttft_sum": 67.09207606315613,
+ "ttft_count": 21,
+ "generation": 2036,
+ "success": 20,
+ "req_prompt_sum": 162710,
+ "req_generation_sum": 1949,
+ "req_computed_sum": 126806,
+ "prefill_s": 60.89627838382148,
+ "decode_s": 61.88017002909328,
+ "drafted": 5138,
+ "accepted": 1315,
+ "epoch": 1791269620.36
+}
