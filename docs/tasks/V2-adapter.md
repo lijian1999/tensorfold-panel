@@ -45,7 +45,7 @@ vLLM 的 `/metrics` 只有全局计数器，没有“每条流现在怎么样”
 以下各步里 `fin = m["success"] - p["success"]`（这次结束的条数）。
 
 **3. 到达。** 先算 `n = m["running"] - 流表行数 + fin`，`dq = m["queries"] - p["queries"]`，`dh = m["hits"] - p["hits"]`。
-“独自出现的条件” = 此刻流表是空的，并且（`empty_since` 是 `None` 或 `now - empty_since >= 0.25`）。
+“独自出现的条件” = 此刻流表是空的。（起点回推的上限和 `solo` 的条件后来在任务 V7 里改过，以 `docs/tasks/V7-start-cap.md` 为准。）
 
 - `dq > 0`：`n = max(1, n)`，新建 `n` 行。`dq` 平均分成各行的 `prompt`，`dh` 平均分成各行的 `cached`。每行的 `start`：满足独自出现的条件时是 `now - min((prompt - cached) / tps, lag)`，否则是 `now`。`solo` = 满足独自出现的条件并且 `n == 1`。`phase` 为 `"prefill"`，`seen` 为 `now`。
 - `dq <= 0` 且 `n > 0`：新建 `n` 行提示未知的行。

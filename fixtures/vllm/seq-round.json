@@ -170,12 +170,12 @@
   {"t": 0.0053, "detail": true, "rows": [], "decoding": 0, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 0, "ttft_sum": 0.0},
   {"t": 1.7069, "detail": true, "rows": [{"id": 1, "phase": "decode", "prompt": 1565, "cached": 0, "start": 1.039, "ttft_s": 0.6674}], "decoding": 1, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 0, "ttft_sum": 0.0},
   {"t": 2.1053, "detail": true, "rows": [], "decoding": 0, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 1, "ttft_sum": 0.6674},
-  {"t": 2.2052, "detail": true, "rows": [{"id": 2, "phase": "prefill", "prompt": 1592, "cached": 0, "start": 2.205, "ttft_s": null}], "decoding": 0, "prefilling": 1, "max": 4, "aborted_total": 0, "ttft_count": 1, "ttft_sum": 0.6674},
+  {"t": 2.2052, "detail": true, "rows": [{"id": 2, "phase": "prefill", "prompt": 1592, "cached": 0, "start": 2.105, "ttft_s": null}], "decoding": 0, "prefilling": 1, "max": 4, "aborted_total": 0, "ttft_count": 1, "ttft_sum": 0.6674},
   {"t": 2.808, "detail": true, "rows": [{"id": 2, "phase": "decode", "prompt": 1592, "cached": 0, "start": 2.141, "ttft_s": 0.667}], "decoding": 1, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 1, "ttft_sum": 0.6674},
   {"t": 3.5053, "detail": true, "rows": [], "decoding": 0, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 2, "ttft_sum": 1.3344},
   {"t": 4.5071, "detail": true, "rows": [{"id": 3, "phase": "decode", "prompt": 1619, "cached": 0, "start": 3.819, "ttft_s": 0.6885}], "decoding": 1, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 2, "ttft_sum": 1.3344},
   {"t": 4.8065, "detail": true, "rows": [], "decoding": 0, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 3, "ttft_sum": 2.023},
-  {"t": 4.9053, "detail": true, "rows": [{"id": 4, "phase": "prefill", "prompt": 1646, "cached": 0, "start": 4.905, "ttft_s": null}], "decoding": 0, "prefilling": 1, "max": 4, "aborted_total": 0, "ttft_count": 3, "ttft_sum": 2.023},
+  {"t": 4.9053, "detail": true, "rows": [{"id": 4, "phase": "prefill", "prompt": 1646, "cached": 0, "start": 4.806, "ttft_s": null}], "decoding": 0, "prefilling": 1, "max": 4, "aborted_total": 0, "ttft_count": 3, "ttft_sum": 2.023},
   {"t": 5.6068, "detail": true, "rows": [{"id": 4, "phase": "decode", "prompt": 1646, "cached": 0, "start": 4.916, "ttft_s": 0.6909}], "decoding": 1, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 3, "ttft_sum": 2.023},
   {"t": 6.0054, "detail": true, "rows": [], "decoding": 0, "prefilling": 0, "max": 4, "aborted_total": 0, "ttft_count": 4, "ttft_sum": 2.7138}
  ]
