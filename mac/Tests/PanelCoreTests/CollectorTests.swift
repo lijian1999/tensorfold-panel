@@ -7,7 +7,7 @@ import Testing
 // MARK: - 辅助函数与辅助类型
 
 /// 保留 6 位小数（对应 Python 的 round(t, 6)）
-private func round6(_ x: Double) -> Double { (x * 1_000_000).rounded() / 1_000_000 }
+private func round6(_ x: Double) -> Double { (x * 1_000_000).rounded(.toNearestOrEven) / 1_000_000 }
 
 /// 取 JSON 数字；取不到时返回 nan（让断言失败而不是崩溃）
 private func num(_ j: JSON?) -> Double { j?.number ?? .nan }
@@ -137,7 +137,7 @@ private let FINISHED: [String: JSON] = [
 private func scene1_c(_ t: Double) -> Int {
     if t < 10.1 { return 185105 }
     if t > 13.4 - 1e-9 { return 185305 }
-    let grown = 6 * (Int(((t - 10.1) * 10).rounded()) + 1)
+    let grown = 6 * (Int(((t - 10.1) * 10).rounded(.toNearestOrEven)) + 1)
     return 185105 + (grown > 200 ? grown - 4 : grown)
 }
 
@@ -246,7 +246,7 @@ private func scene1_steps() -> [(Double, JSON)] {
     /// t 时刻的 C：t=5.3 起每 0.1 秒加 6（60 tok/s），涨到 1300 后平 3 秒不涨。
     private func decode_c(_ t: Double) -> Int {
         if t <= 5.2 { return 1000 }
-        if t <= 10.2 + 1e-9 { return 1000 + 6 * Int(((t - 5.2) * 10).rounded()) }
+        if t <= 10.2 + 1e-9 { return 1000 + 6 * Int(((t - 5.2) * 10).rounded(.toNearestOrEven)) }
         return 1300
     }
 
@@ -300,7 +300,7 @@ private func scene1_steps() -> [(Double, JSON)] {
 
         /// 解码中每 0.1 秒加 6：t=起点时刻时还是 start。
         func decode_c(_ t: Double, _ start: Int) -> Int {
-            start + 6 * Int(((t - 5.0) * 10).rounded())
+            start + 6 * Int(((t - 5.0) * 10).rounded(.toNearestOrEven))
         }
 
         scene.at(1.0, health(base, c: .int(1000)))
@@ -1119,7 +1119,7 @@ fileprivate func vllm_long_scene(usage: FakeUsage? = nil) -> (Collector, Scene) 
         let scene = Scene(collector)
         scene.at(1.0, vhealth(), metrics: vmetrics())
         for t in every_tenth(10.0, 19.9) {
-            let k = Int(((t - 10) * 10).rounded())
+            let k = Int(((t - 10) * 10).rounded(.toNearestOrEven))
             scene.at(t, vhealth(running: 1, dec: 1, c: .int(2000 + k),
                                 rows: [vrow(1, "decode", 67, output: k, start: 9.9, ttft: 0.13)]),
                      metrics: vmetrics())

@@ -258,9 +258,3 @@ public final class UsageLedger: UsageSink {
         }
     }
 }
-
-// 临时：合并时删掉，以 Collector.swift 里的为准
-public protocol UsageSink: AnyObject {
-    func update(_ totals: JSON) throws
-    func today() throws -> JSON
-}

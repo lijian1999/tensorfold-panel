@@ -14,8 +14,8 @@ func loadFixture(_ name: String) -> JSON {
     return JSON.parse(data)!
 }
 
-/// 对应 unittest 的 assertAlmostEqual(a, b, places=places)：差值按 places 位小数四舍五入后为 0
+/// 对应 unittest 的 assertAlmostEqual(a, b, places=places)：差值按 places 位小数取整（同 Python round，逢五取偶）后为 0
 func almostEqual(_ a: Double, _ b: Double, places: Int = 7) -> Bool {
     let scale = pow(10.0, Double(places))
-    return ((a - b) * scale).rounded() == 0
+    return ((a - b) * scale).rounded(.toNearestOrEven) == 0
 }
