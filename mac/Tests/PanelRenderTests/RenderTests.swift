@@ -103,7 +103,8 @@ private func ringPixel(_ f: Double, _ radius: Double = 124) -> (Int, Int) {
 
 // ---------------------------------------------------------------- 二、取像素检查颜色
 
-@Suite struct DrawPixels {
+// 这些测试都要向字体服务取字体；同时跑的测试一多，测试线程池会全卡在等回复上，所以这一组按顺序跑
+@Suite(.serialized) struct DrawPixels {
     @Test func test_background() {
         // 整屏底色，以及每张卡片里没有字的地方是卡片底色。
         for name in fixtureNames {
@@ -317,6 +318,29 @@ private func ringPixel(_ f: Double, _ radius: Double = 124) -> (Int, Int) {
 }
 
 // ---------------------------------------------------------------- 五、速度
+
+@Suite struct DrawStripFit {
+    /// 模型名太长时截短，右边的文字和没有模型名时画得一样
+    @Test func test_长模型名不压右边() {
+        var v = View()
+        v.state = "idle"
+        v.stateName = "空闲"
+        v.lanes.max = 8
+        v.stripRight = [Seg("内存 "), Seg("29.5", "strong"), Seg(" / 48 GB")]
+        var bare = v
+        v.stripLeft = "Qwen3-4B-Instruct-2507-4bit-very-long-name · oMLX"
+        bare.stripLeft = ""
+        let a = Renderer.makeContext(width: 960, height: 640)!
+        let b = Renderer.makeContext(width: 960, height: 640)!
+        Renderer().draw(a, view: v, frame: Animator.settled(v))
+        Renderer().draw(b, view: bare, frame: Animator.settled(bare))
+        var diff = 0
+        for y in 30..<62 { for x in 730..<932 where !same(pixel(a, x, y), pixel(b, x, y), 0) { diff += 1 } }
+        #expect(diff == 0)
+        // 左边确实写了字
+        #expect(rowBrightest(a, 46, 300, 600) != rowBrightest(b, 46, 300, 600))
+    }
+}
 
 @Suite struct DrawSpeed {
     @Test func test_hundred_frames() {

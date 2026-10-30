@@ -60,6 +60,9 @@ private func mix(_ c1: CGColor, _ c2: CGColor, _ t: Double) -> CGColor {
 private typealias TextSeg = (text: String, size: Double, bold: Bool, color: CGColor, ls: Double)
 
 // 弧度：math.radians(d)。
+nonisolated(unsafe) private var fontCache: [String: CTFont] = [:]   // 只在 fontLock 里读写
+private let fontLock = NSLock()
+
 private func rad(_ d: Double) -> CGFloat { CGFloat(d * .pi / 180) }
 
 public final class Renderer {
@@ -69,8 +72,15 @@ public final class Renderer {
 
     /// 字体：系统等宽数字字体 + 字重（中文自动用苹方）。
     private func font(_ size: CGFloat, _ bold: Bool) -> CTFont {
+        // 按（字号, 粗细）缓存、加锁取：多个线程同时向字体服务要字体时偶尔会互相卡住
+        fontLock.lock()
+        defer { fontLock.unlock() }
+        let key = "\(size)|\(bold)"
+        if let f = fontCache[key] { return f }
         // 等宽数字（对应 Pango 的 tnum=1）
-        NSFont.monospacedDigitSystemFont(ofSize: size, weight: bold ? .semibold : .regular) as CTFont
+        let f = NSFont.monospacedDigitSystemFont(ofSize: size, weight: bold ? .semibold : .regular) as CTFont
+        fontCache[key] = f
+        return f
     }
 
     private struct TextItem {
@@ -104,7 +114,7 @@ public final class Renderer {
     }
 
     /// 一段文字占多宽（用来算后面文字的起点）。
-    private func _width(_ ctx: CGContext, _ text: String, _ size: Double, _ bold: Bool, _ ls: Double = 0) -> Double {
+    private func _width(_ ctx: CGContext?, _ text: String, _ size: Double, _ bold: Bool, _ ls: Double = 0) -> Double {
         if text.isEmpty { return 0 }
         return Double(makeItem(text, size, bold, ls, MUTED).w)
     }
@@ -240,16 +250,31 @@ public final class Renderer {
             _text(ctx, view.stateName, 14, x, STRIP_Y, TEXT, true)
             x += w + 8
         }
-        if !view.stripLeft.isEmpty {
-            _text(ctx, view.stripLeft, 13, x, STRIP_Y, MUTED)
-        }
+        var rightW = 0.0
         if !view.stripRight.isEmpty {
             let segs: [TextSeg] = view.stripRight.map { seg in
                 let (b, c) = style(seg.style, MUTED)
                 return (seg.text, 13, b, c, 0.0)
             }
-            _drawLine(ctx, segs, 466, STRIP_Y, align: "right")
+            rightW = _drawLine(ctx, segs, 466, STRIP_Y, align: "right")
         }
+        if !view.stripLeft.isEmpty {
+            // 模型名太长时截短加“…”，不压到右边的文字
+            let room = 466 - rightW - (rightW > 0 ? 10 : 0) - x
+            _text(ctx, _fit(view.stripLeft, 13, room), 13, x, STRIP_Y, MUTED)
+        }
+    }
+
+    /// 放不下 maxW 时从末尾删字、加“…”；一个字也放不下就返回空串。
+    private func _fit(_ text: String, _ size: Double, _ maxW: Double) -> String {
+        if _width(nil, text, size, false) <= maxW { return text }
+        var s = text
+        while !s.isEmpty {
+            s.removeLast()
+            let t = s.trimmingCharacters(in: .whitespaces) + "…"
+            if _width(nil, t, size, false) <= maxW { return t }
+        }
+        return ""
     }
 
     // ------------------------------------------------------------ 仪表
