@@ -76,7 +76,7 @@ public final class ViewModel {
     /// 两次 update 之间记住四件事：休息画面是哪一种、预填充有没有接管画面、
     /// 上一次的状态（慢淡入）、今日统计开始显示的时刻（调暗）。
 
-    private let config: Config
+    public var config: Config            // app 改设置（时区、单价）时换掉
     private var restKind = "today"                 // 上一次休息画面：today 或 round
     private var tookOver = false                   // 预填充是否接管了画面
     private var prevState: String? = nil           // 上一次的状态

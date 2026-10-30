@@ -305,3 +305,94 @@ public final class Renderer {
 ```
 
 `Renderer` 只在一个线程上用（app 里是主线程）。
+
+### 9.3 内存、轮询（A1，`Memory.swift`、`Poller.swift`）
+
+```swift
+/// 整机内存，口径同活动监视器：{"used_gb": 已用, "total_gb": 总量}（GB 按 1024³）；读不到返回 nil
+public func readSystemMemory() -> JSON?
+
+/// 单调时钟（秒），给轮询和动画用
+public func monotonicNow() -> Double
+
+/// 引擎读取：OmlxReader 满足它；测试里换成假的
+public protocol EngineSource: AnyObject {
+    var issue: EngineIssue { get }
+    var modelIDs: [String] { get }
+    var modelName: String? { get }
+    func read(now: Double, wall: Double) -> (health: JSON, metrics: JSON)?
+}
+extension OmlxReader: EngineSource {}
+
+public final class Poller: @unchecked Sendable {
+    public init(source: EngineSource, collector: Collector,
+                readMemory: @escaping () -> JSON? = readSystemMemory,
+                clock: @escaping () -> Double = monotonicNow,
+                wallClock: @escaping () -> Double = { Date().timeIntervalSince1970 })
+    public var source: EngineSource                     // 只在轮询线程上（perform 里）换
+    public func tick() -> (snapshot: JSON, wait: Double)
+    public func perform(_ action: @escaping () -> Void) // 交给轮询线程：下一次 tick 开头按交来的顺序执行
+    public func start(onSnapshot: @escaping (JSON) -> Void)   // 起后台线程：tick → onSnapshot（在后台线程上调）→ 等 wait 秒，循环
+    public func stop()                                  // 让后台线程退出，最多等 1 秒
+}
+```
+
+### 9.4 设置（A1，`AppSettings.swift`）
+
+```swift
+public enum ZoneChoice: String, CaseIterable, Sendable { case system, beijing, pacific }
+public enum KeyMode: String, CaseIterable, Sendable { case auto, manual }
+
+public final class AppSettings {
+    public init(defaults: UserDefaults)                 // app 里传 UserDefaults(suiteName: "com.tensorfold.panel")!
+    public var engine: String                           // 键 "engine"，默认 "omlx"
+    public var address: String                          // 键 "address"，默认 "127.0.0.1:8000"
+    public var keyMode: KeyMode                         // 键 "api_key_mode"，默认 .auto
+    public var manualKey: String                        // 键 "api_key"，默认 ""
+    public var zone: ZoneChoice                         // 键 "timezone_choice"，默认 .system
+    public var prices: [String: ModelPrice]             // 键 "prices"，默认 [:]
+    public var knownModels: [String]                    // 键 "known_models"，默认 []
+    public var screenName: String                       // 键 "screenName"，默认 "TYPE-C"
+    public var autoSwitchMode: Bool                     // 键 "autoSwitchMode"，默认 true
+    public var launchAtLogin: Bool                      // 键 "launchAtLogin"，默认 false（只记用户的选择，登记由 app 做）
+    public func zoneIdentifier(systemZone: String = TimeZone.current.identifier) -> String
+    public func config(systemZone: String = TimeZone.current.identifier) -> Config
+    public func apiKey(settingsPath: String = "~/.omlx/settings.json") -> String?
+    public func rememberModels(_ ids: [String])
+    public func forgetModel(_ id: String)
+}
+```
+
+### 9.5 app 内部（A2、A3，`mac/Sources/TFPanel/`）
+
+可执行目标 `TFPanel` 依赖 `PanelCore`、`PanelRender`，可以 `import` `Foundation`、`AppKit`、`SwiftUI`、`ServiceManagement`、`CoreGraphics`、`ImageIO`、`UniformTypeIdentifiers`。下面这些类型是 A2、A3 之间的接口：
+
+```swift
+// A2：AppController.swift
+@MainActor final class AppController {
+    let settings: AppSettings
+    let screens: ScreenManager
+    private(set) var issue: EngineIssue          // 最近一拍的引擎状态
+    private(set) var modelIDs: [String]          // 最近一拍 oMLX 的模型列表
+    private(set) var currentModel: String?       // 最近一拍的模型名（原文）
+    var onStatusChange: (() -> Void)?            // 上面三项或副屏状态变了时调（菜单、设置窗口刷新用）
+    func settingsChanged()                       // 菜单或设置窗口改了设置之后调，立刻生效
+}
+
+// A2：ScreenManager.swift
+@MainActor final class ScreenManager {
+    var statusText: String { get }               // "TYPE-C · 960 × 640"；没找到时 "未找到 TYPE-C"
+    var modeNote: String? { get }                // 切不到 960 × 640 时的一句提示，否则 nil
+    func applyAutoSwitch()                       // 对已连接的副屏按设置切一次显示模式
+}
+
+// A3：StatusMenu.swift、SettingsWindow.swift、LoginItem.swift
+@MainActor final class StatusMenu: NSObject { init(controller: AppController) }
+enum SettingsPage: String, CaseIterable { case engine, price, screen }
+@MainActor final class SettingsWindowController { init(controller: AppController); func show(page: SettingsPage) }
+enum LoginItem {
+    static var available: Bool { get }           // 从 .app 包运行时才可用
+    static var enabled: Bool { get }             // SMAppService.mainApp.status == .enabled
+    static func set(_ on: Bool) -> Bool          // 登记 / 取消，成功返回 true
+}
+```
