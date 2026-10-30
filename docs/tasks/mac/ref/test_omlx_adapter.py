@@ -122,7 +122,7 @@ class TestOmlxAdapter(unittest.TestCase):
         self.assertEqual(rows[1]["start"], 1.5)       # 排队的行先编号
         self.assertEqual(rows[1]["cached"], 256)
         self.assertEqual(rows[1]["filled"], 512)
-        self.assertEqual(rows[2]["start"], 1.6)
+        self.assertEqual(rows[2]["start"], 0.8)  # 第一次见到就在解码：取上次读数（0）和开始解码（1.6）的中点
 
     def test_正常结束记首字和两项累计秒数(self):
         self.feed(0.0, status(), stats(model()))

@@ -1,45 +1,59 @@
 # 交接：Mac 版副屏仪表盘
 
+## 完工报告（2026-10-30）
+
+目标：按设计文档 `docs/design-mac.md` 和原型 `docs/dashboard-prototype.html` 完整实现 Mac 版（全 Swift、一个进程、只接 oMLX），沿用派工方式（pi 执行、编排者验收）。代码在分支 `mac-v3`，`cd mac && swift test`：PanelCore 269 个 + PanelRender 15 个测试全过；`mac/scripts/build-app.sh` 出 `mac/dist/TFPanel.app`。
+
+### 设计要求逐条
+
+| 要求 | 状态 | 依据 |
+| --- | --- | --- |
+| 全 Swift、一个进程、菜单栏 app | 做到 | `mac/` 三个目标 PanelCore / PanelRender / TFPanel；Info.plist `LSUIElement`、`.accessory`；实测第二次启动日志“已有 TFPanel 在运行，本次退出” |
+| 采集、今日用量、视图模型、动画照 Spark 版行为 | 做到 | M1–M4 逐条翻译 Python 测试（第一批 178 个测试）；之后一直全过 |
+| 只接 oMLX，设置里选引擎 | 做到 | O1 适配器 + 读取器；9 段实录序列（`fixtures/omlx/`：短请求、3 万长提示、带缓存、4 并发、10 排队、解码中断开、预填充中断开、加载、混合）回放测试；设置窗口“引擎”页 |
+| 按模型记账、单价按模型填、无默认价 | 做到 | O2；设置窗口“费用”页（A3）；实测：没填 → 主数字 `—` + “未填单价 · 在菜单栏里填”；填 Qwen3-4B → `$5.30`，和手算 9×0.1+11×0.4 一致；“不含 N 个模型”由 `ViewModelTests` 覆盖（只有一个能对话的模型，实机凑不出两个） |
+| 时区：系统 / 北京 / 太平洋 | 做到 | 菜单子菜单（A3）；实测切太平洋显示“10月29日 · 太平洋时间”，切回北京按换日处理（设计第 280 行） |
+| 完成画面第三张卡是首字 | 做到 | O3；实测短请求首字 0.13 s（oMLX 自报 0.07 s，误差在一次轮询内），3.8 万 token 长提示首字 31.33 s |
+| 画面和原型一致 | 做到 | R1 和原型截图逐张对照；实机空闲 / 预填充 / 解码 / 完成 / 本轮 / 离线 / 需要 key 截图都对 |
+| 验收 1：`swift test` 全过，测试数对得上 | 做到 | 269 + 15 全过；翻译任务的测试和 Python 1:1（见派工记录 M1–M4 行） |
+| 验收 2：一条命令打包，只有菜单栏图标，不开第二个 | 做到（拷进 `/Applications` 双击留给用户） | build-app.sh 出包、codesign 检查通过；`LSUIElement`；单实例实测 |
+| 验收 3：接上副屏自动切 960×640、铺满、不抢焦点 | 部分：铺满和不吃点击做到；自动切模式、拔插留给用户 | 这台 MBP 上不切 TYPE-C 的显示模式（一直用 `--no-mode-switch`）；窗口 `canBecomeKey/Main = false`、`ignoresMouseEvents`；画面按图层实际像素渲染核对过铺满和居中 |
+| 验收 4：七种情况和原型一致、数字对得上 | 做到 | 实录序列回放（上面 9 段）+ 实机短请求、长提示、本轮；速度 97.4 对 oMLX 100.5 |
+| 验收 5：加载中画面；离线 3 次、重开自动连上 | 做到（不能关 oMLX，用错地址代替） | `CollectorTests` 加载状态；`OmlxReaderTests.test_连续3次读不到后重新认引擎`；实测地址写错 → “引擎离线”画面 |
+| 验收 6：三个时区、跨 0 点清零 | 做到 | 见上；跨 0 点由 M2 的换日测试覆盖 |
+| 验收 7：费用单价 | 做到 | 见上 |
+| 验收 8：改 key、改地址立刻生效 | 代码做到；运行中改设置窗口没实机点 | `AppController.settingsChanged` 换读取器 / 换 key 都走轮询线程；实测启动时错 key → 状态条“oMLX 需要 API key · 在设置里填写”，错地址 → 离线 |
+| 验收 9：登录时启动 | 留给用户 | 改登录项属于系统设置，按约定不在这台机器上动；实现见 `LoginItem.swift`（SMAppService） |
+| 验收 10：CPU 空闲 < 1%、解码 < 5% | 做到（Studio 上用活动监视器再看一次） | 空闲 0.5%；稳定解码在这台 MBP 的 2 倍屏（1920×1080 像素）5.5%，按 1 倍画（960×540，接近 Studio 的 960×640）3.4% |
+
+### 分工
+
+派给本地模型（pi，全部 low 档）的 11 个任务：
+
+- 第一批 M1 采集、M2 今日用量、M3 视图模型、M4 动画：通过。
+- 第二批 O1 oMLX 适配器和读取器、O2 按模型记账、O3 Mac 版画面文字：通过。
+- 第三批 R1 绘制、A1 轮询 / 设置 / 内存、A2 app 主体、A3 菜单栏和设置窗口：通过（A1 报 FAILED，是说明里的套件名和已有的重名，编排者改名后全过）。
+
+编排者直接做的：接口约定和全部任务说明、oMLX 参考实现和实录回放数据、每批开工前的公共底座（Swift 包、PanelRender / TFPanel 目标、占位文件、图标），以及实机调出来的几处修正（套件改名、删临时 Log、状态条长模型名截短、绘制测试卡死、首字恒为 0、短回答速度偏高、CPU 占用）。这些修正按 `orchestrate-local-pi` skill 第 1 节自己改：定位之后改动已经确定，任务说明写出来基本就是 diff，或者比改动本身还长，派工反而更费 token。难的是定位（`sample`、对照程序、实机对照 oMLX 自报的数字），这一步本来就得编排者自己做。每处都在派工记录里记了一行。
+
+### 没做的、留给用户的
+
+1. **Studio 上的验收**：拷 `TFPanel.app` 到 `/Applications` 双击（验收 2）、接副屏自动切 960×640 和拔插（验收 3）、登录时启动（验收 9）、活动监视器看 CPU（验收 10）、设置窗口里改 key / 地址（验收 8）。这台 MBP 上不切显示模式、不改登录项，无人值守时也没法点菜单和设置窗口。
+2. **删 Spark 版代码**：按已定的做法，Studio 上验收通过后单独一个提交删。
+3. 已知小问题：状态条模型名截短时，“…”前面可能留一个“·”（只影响很长的模型名）。
+4. 这台机器上留有测试时产生的今日用量（`~/Library/Application Support/TFPanel/`），设置已经还原（只剩 app 自己记的 `known_models`）。
+
 ## 目标和依据
 
-把副屏性能仪表盘从 DGX Spark（Python + GTK）搬到 Mac Studio：全 Swift 的 Mac 应用，在 MacBook Pro 上用 Swift 命令行工具构建；这一版只接 oMLX。
-
-- 设计文档：`docs/design-mac.md`（已确认）；原型：`docs/dashboard-prototype.html`（已确认）。
-- 接口约定：`docs/tasks/mac/00-contracts.md`（第 9 节是 app 层：绘制、轮询、设置、app 内部类型）。
-- 执行者约定：`AGENTS.md`。
-- 做法：`orchestrate-local-pi` skill；派工记录 `docs/orchestration-notes.md`。
-
-## 已完成
-
-| 任务 | 结果 |
-| --- | --- |
-| 第一批 M1–M4：采集、今日用量、视图模型、动画（Python 原样翻译）+ 基础类型 | 通过 |
-| 第二批 O1 oMLX 适配器和读取器（`Sources.swift`、`Engine.swift`） | 通过；实机读本机 oMLX 正常 |
-| 第二批 O2 今日用量按模型记账 | 通过 |
-| 第二批 O3 视图模型的 Mac 版文案（首字卡、时区名、未填单价） | 通过 |
-| 第三批 R1 绘制 `PanelRender/Renderer.swift` | 通过，和原型截图对照一致 |
-| 第三批 A1 轮询 `Poller.swift`、设置 `AppSettings.swift`、内存 `Memory.swift` | 通过 |
-| TFPanel 可执行目标 + 8 个占位文件 + 图标（编排者直接写） | 能编译 |
-
-当前状态：分支 `mac-v3`，`cd mac && swift test` PanelCore 251 + PanelRender 14 全过。
-
-## 正在做（第三批后半）
-
-- A2 `docs/tasks/mac/A2-app-core.md`：入口、AppController、找副屏和切显示模式、PanelView、日志、Info.plist、`mac/scripts/build-app.sh`。worktree `../tensorfold-panel-wt/A2-app-core`。
-- A3 `docs/tasks/mac/A3-menu-settings.md`：菜单栏、设置窗口三页、登录时启动，PanelCore 里的 `MenuText.swift`、`PriceForm.swift`。worktree `../tensorfold-panel-wt/A3-menu-settings`。
-
-两个任务的文件不重叠，都按约定 9.5 节用对方的占位类型。
-
-## 之后
-
-1. A2、A3 验收合并后，用 `--window --no-mode-switch` 实测 app：画面和原型对照、本机 oMLX 的空闲 / 解码 / 完成、菜单和设置窗口三页、改单价和时区后立刻生效、打包、空闲和忙时 CPU。
-2. 对照设计文档的验收项逐条做端到端检查，写完工报告。
+- 设计文档：`docs/design-mac.md`；原型：`docs/dashboard-prototype.html`。
+- 接口约定：`docs/tasks/mac/00-contracts.md`；执行者约定：`AGENTS.md`；派工记录：`docs/orchestration-notes.md`。
+- oMLX 参考实现和回放：`docs/tasks/mac/ref/`（`python3 docs/tasks/mac/ref/test_omlx_adapter.py`、`replay.py --write` 生成 `fixtures/omlx/*.expected.jsonl`），和 Swift 版行为一致。
 
 ## 需要知道的
 
-- 套件名在整个测试目标里不能重复：视图模型那份叫 `TestOfflineView`；内存读数的套件叫 `TestSystemMemory`（视图模型里已有 `TestMemory`）。
-- SwiftPM 每个测试目标打印一行 `Test run with N tests`，看总数用 `grep 'Test run with'`，不要只看 `tail -1`。
-- 副屏 TYPE-C 现在接在这台 MBP 上（1920×1080）。app 默认会把它切到 960×640，实测时加 `--no-mode-switch`；“自动切显示模式”这一项留给用户在 Studio 上确认。
-- 并行派工：每个任务一个 `git worktree`（`../tensorfold-panel-wt/<任务名>`，分支名小写），里面放 `.orch` 符号链接指回主仓库，用 `ORCH_ROOT=<worktree> start_pi.sh …` 启动；看板和 `wait.sh` 在主仓库根目录跑。验收后在 worktree 里提交，合进 `mac-v3`，删掉 worktree 和分支。
-- 环境：Swift 6.4 命令行工具（没有 Xcode）；只有 swift-testing；`Package.swift` 给测试目标加了 `-plugin-path`。
-- 本机 oMLX 在跑（端口 8000）；原型预览服务在 18470 端口（`.claude/launch.json` 的 `prototype`）。
+- 实测 app：`mac/dist/TFPanel.app/Contents/MacOS/TFPanel --no-mode-switch`（不要 `open`，会切副屏的显示模式）；`--capture <目录>` 后 `kill -USR1 <pid>` 存一张当前画面；`--window` 在主屏开预览窗口。
+- 设置在 `defaults` 域 `com.tensorfold.panel`；单价是 JSON Data，每个模型三项 `input`、`cached`、`output` 都要有，少一项整张表读不出来。
+- 这台机器上 bash 进程没有录屏权限，`screencapture` 只得到黑图；看画面用 `--capture`。
+- 读 oMLX 走 `SocketTransport`（http 地址），https 才用 URLSession；画面由 `PanelView` 自管的 CALayer 直接画，别改回 `NSView.draw`（解码时 CPU 高好几倍）。
+- 套件名在整个测试目标里不能重复；`swift test` 每个测试目标各打一行 `Test run with N tests`。
+- 没有 `timeout` 命令；本机 oMLX 在 8000 端口，原型预览服务在 18470。

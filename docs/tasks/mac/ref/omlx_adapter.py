@@ -49,6 +49,7 @@ class OmlxAdapter:
     def reset(self):
         """回到刚建好的状态（contexts、max_streams 不动）。"""
         self._prev = None            # 上一次完整读数的四项累计值（元组），None 表示还没有
+        self._last_full = None       # 上一次完整读数的时刻
         self._uptime = None          # 上一次的 uptime_seconds
         self._epoch = None           # 粘住的启动时刻（整数秒）
         self._rows = {}              # request_id → 行，插入顺序就是第一次见到的顺序
@@ -143,6 +144,7 @@ class OmlxAdapter:
         if self._prev is None:
             self._first(now, tables)
             self._prev = totals
+            self._last_full = now
             self._fit_placeholders(now, tables, active, waiting_status)
             base = self._last_model or self._default_model or ""
             self._by_model = {base: [totals[1], totals[2], totals[3], totals[0]]}
@@ -162,6 +164,7 @@ class OmlxAdapter:
         # 6. 占位
         self._fit_placeholders(now, tables, active, waiting_status)
         self._prev = totals
+        self._last_full = now
         return self._output(now, totals, active, waiting_status, tables)
 
     # ---- 解析 ----
@@ -244,6 +247,10 @@ class OmlxAdapter:
                     start = now - self._elapsed(table, r)
                 elif self._placeholders:
                     start = self._placeholders.pop(0)
+                elif (table == "generating" and self._last_full is not None
+                      and self._last_full < now - self._elapsed(table, r)):
+                    # 两次读数之间就预填充完了：只知道它在上次读数和开始解码之间到的，取中点（误差不超过半次轮询）
+                    start = (self._last_full + now - self._elapsed(table, r)) / 2
                 else:
                     start = now - self._elapsed(table, r)
                 self._new_row(rid, model, start)
