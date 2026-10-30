@@ -55,6 +55,147 @@ public final class URLSessionTransport: HTTPTransport {
     }
 }
 
+/// http 地址直接用套接字发 HTTP/1.1（每次一条连接，Connection: close）；
+/// 每秒要读好几次，URLSession 每个请求的开销在空闲时就占掉 1% 左右的 CPU，套接字只要它的五分之一
+public final class SocketTransport: HTTPTransport {
+    private let host: String
+    private let port: String
+    private let prefix: String     // 地址里带的路径前缀，没有就是空串
+    private let hostHeader: String
+    private let timeout: Double
+
+    /// baseURL 不是 http 地址时返回 nil
+    public init?(baseURL: String, timeout: Double = 0.5) {
+        var b = baseURL.trimmingCharacters(in: .whitespaces)
+        if !b.contains("://") { b = "http://" + b }
+        while b.hasSuffix("/") { b.removeLast() }
+        guard let c = URLComponents(string: b), c.scheme?.lowercased() == "http",
+              let h = c.host, !h.isEmpty else { return nil }
+        host = h
+        port = String(c.port ?? 80)
+        prefix = c.percentEncodedPath
+        hostHeader = (h.contains(":") ? "[\(h)]" : h) + (c.port.map { ":\($0)" } ?? "")
+        self.timeout = timeout
+    }
+
+    public func get(_ path: String, headers: [String: String]) -> HTTPResult? {
+        let deadline = Date().timeIntervalSince1970 + timeout
+        guard let fd = connectSocket(deadline: deadline) else { return nil }
+        defer { close(fd) }
+        var req = "GET \(prefix)\(path) HTTP/1.1\r\nHost: \(hostHeader)\r\n"
+        for (k, v) in headers { req += "\(k): \(v)\r\n" }
+        req += "Accept: application/json\r\nConnection: close\r\n\r\n"
+        let bytes = Array(req.utf8)
+        var sent = 0
+        while sent < bytes.count {
+            guard wait(fd, for: Int16(POLLOUT), deadline: deadline) else { return nil }
+            let n = bytes[sent...].withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+            if n < 0 { if errno == EAGAIN || errno == EINTR { continue }; return nil }
+            sent += n
+        }
+        // 读到对方关连接为止
+        var raw = Data()
+        var buf = [UInt8](repeating: 0, count: 16384)
+        while true {
+            guard wait(fd, for: Int16(POLLIN), deadline: deadline) else { return nil }
+            let n = recv(fd, &buf, buf.count, 0)
+            if n < 0 { if errno == EAGAIN || errno == EINTR { continue }; return nil }
+            if n == 0 { break }
+            raw.append(buf, count: n)
+        }
+        return Self.parseResponse(raw)
+    }
+
+    /// 非阻塞连接，等到 deadline 为止；失败返回 nil
+    private func connectSocket(deadline: Double) -> Int32? {
+        var hints = addrinfo()
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, port, &hints, &res) == 0, let first = res else { return nil }
+        defer { freeaddrinfo(res) }
+        var ai: UnsafeMutablePointer<addrinfo>? = first
+        while let a = ai {
+            ai = a.pointee.ai_next
+            let fd = socket(a.pointee.ai_family, a.pointee.ai_socktype, a.pointee.ai_protocol)
+            if fd < 0 { continue }
+            var one: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            if connect(fd, a.pointee.ai_addr, a.pointee.ai_addrlen) == 0 { return fd }
+            if errno == EINPROGRESS, wait(fd, for: Int16(POLLOUT), deadline: deadline) {
+                var err: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                if getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0, err == 0 { return fd }
+            }
+            close(fd)
+        }
+        return nil
+    }
+
+    /// 等套接字可读 / 可写，到 deadline 还不行返回 false
+    private func wait(_ fd: Int32, for events: Int16, deadline: Double) -> Bool {
+        while true {
+            let left = deadline - Date().timeIntervalSince1970
+            if left <= 0 { return false }
+            var p = pollfd(fd: fd, events: events, revents: 0)
+            let r = poll(&p, 1, Int32(max(1, (left * 1000).rounded(.up))))
+            if r > 0 { return true }
+            if r == 0 || errno != EINTR { return false }
+        }
+    }
+
+    /// 拆响应：状态行、头、内容（按 Content-Length、chunked，或者都没有时到结尾为止）
+    static func parseResponse(_ raw: Data) -> HTTPResult? {
+        let sep = Data("\r\n\r\n".utf8)
+        guard let end = raw.range(of: sep),
+              let head = String(data: raw[raw.startIndex..<end.lowerBound], encoding: .utf8) else { return nil }
+        let lines = head.components(separatedBy: "\r\n")
+        let parts = lines[0].split(separator: " ")
+        guard parts.count >= 2, parts[0].hasPrefix("HTTP/"), let status = Int(parts[1]) else { return nil }
+        var length: Int?
+        var chunked = false
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if name == "content-length" { length = Int(value) }
+            if name == "transfer-encoding", value.lowercased().contains("chunked") { chunked = true }
+        }
+        var body = Data(raw[end.upperBound...])
+        if chunked {
+            guard let b = dechunk(body) else { return nil }
+            body = b
+        } else if let n = length {
+            guard body.count >= n else { return nil }   // 没收全
+            body = body.prefix(n)
+        }
+        return HTTPResult(status: status, body: Data(body))
+    }
+
+    private static func dechunk(_ data: Data) -> Data? {
+        var out = Data()
+        var i = data.startIndex
+        let crlf = Data("\r\n".utf8)
+        while true {
+            guard let r = data.range(of: crlf, in: i..<data.endIndex),
+                  let line = String(data: data[i..<r.lowerBound], encoding: .ascii),
+                  let size = Int(line.split(separator: ";")[0].trimmingCharacters(in: .whitespaces), radix: 16)
+            else { return nil }
+            i = r.upperBound
+            if size == 0 { return out }
+            guard data.distance(from: i, to: data.endIndex) >= size + 2 else { return nil }
+            let j = data.index(i, offsetBy: size)
+            out.append(data[i..<j])
+            i = data.index(j, offsetBy: 2)
+        }
+    }
+}
+
+/// 按地址选传输层：http 用套接字，其余（https）用 URLSession
+public func makeTransport(baseURL: String, timeout: Double = 0.5) -> HTTPTransport {
+    SocketTransport(baseURL: baseURL, timeout: timeout) ?? URLSessionTransport(baseURL: baseURL, timeout: timeout)
+}
+
 public enum EngineIssue: String, Sendable {
     case none, unreachable, notOmlx, needsKey
 

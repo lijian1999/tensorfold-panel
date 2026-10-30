@@ -210,6 +210,14 @@ public final class URLSessionTransport: HTTPTransport {
     public init(baseURL: String, timeout: Double = 0.5)   // baseURL 如 "127.0.0.1:8000"，没写协议时补 "http://"
 }
 
+/// http 地址用套接字直接发 HTTP/1.1（Connection: close），比 URLSession 省 CPU；不是 http 地址时 init 返回 nil
+public final class SocketTransport: HTTPTransport {
+    public init?(baseURL: String, timeout: Double = 0.5)
+}
+
+/// app 用这个建传输层：http → SocketTransport，其余（https）→ URLSessionTransport
+public func makeTransport(baseURL: String, timeout: Double = 0.5) -> HTTPTransport
+
 public enum EngineIssue: String, Sendable {
     case none, unreachable, notOmlx, needsKey
     public var message: String? { get }   // none → nil；unreachable → "未连接"；notOmlx → "这个地址上不是 oMLX"；needsKey → "oMLX 需要 API key · 在设置里填写"

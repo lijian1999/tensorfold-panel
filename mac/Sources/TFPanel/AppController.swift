@@ -48,7 +48,7 @@ final class AppController {
         let viewModel = ViewModel(config: config)
         let address = settings.address
         let key = settings.apiKey()
-        let reader = OmlxReader(transport: URLSessionTransport(baseURL: address),
+        let reader = OmlxReader(transport: makeTransport(baseURL: address),
                                 apiKey: key, maxStreams: omlxMaxStreams())
         let box = Box()
         box.animFps = config.animFps
@@ -146,7 +146,7 @@ final class AppController {
         let key = settings.apiKey()
         if address != readerAddress {
             // 地址变了：整个读取器换掉
-            let reader = OmlxReader(transport: URLSessionTransport(baseURL: address),
+            let reader = OmlxReader(transport: makeTransport(baseURL: address),
                                     apiKey: key, maxStreams: omlxMaxStreams())
             let poller = self.poller
             poller.perform { poller.source = reader }

@@ -335,6 +335,10 @@ public final class Renderer {
     /// 刻度数字：六个，位置见任务说明。
     private func _ticks(_ ctx: CGContext, _ view: View, _ frame: Frame) {
         if frame.ticksAlpha <= 0 { return }
+        // 几个刻度数字互不重叠，直接乘不透明度，不开整屏大小的透明图层（解码时每帧都要画，图层很费 CPU）
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        ctx.setAlpha(CGFloat(min(1, frame.ticksAlpha)))
         let labels = (scales[view.scale] ?? scales["decode"]!).labels
         let (cx, cy, r) = DIAL
         for (f, label) in zip(tickFracs, labels) {
@@ -510,7 +514,7 @@ public final class Renderer {
         ctx.fill(CGRect(x: 0, y: 0, width: 480, height: 320))
         _block(ctx, frame.stripAlpha) { self._strip(ctx, view, frame) }
         _dial(ctx, view, frame)
-        _block(ctx, frame.ticksAlpha) { self._ticks(ctx, view, frame) }
+        _ticks(ctx, view, frame)
         _block(ctx, frame.centerAlpha) { self._center(ctx, view, frame) }
         _block(ctx, frame.statsAlpha) { self._cards(ctx, view, frame) }
         if frame.dim < 1 {
