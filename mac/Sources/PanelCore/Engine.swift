@@ -67,6 +67,7 @@ public final class OmlxAdapter {
     private var epoch: Int?           // 粘住的启动时刻（整数秒）
     private var rowList: [Row] = []      // 按第一次见到的顺序
     private var placeholders: [Double] = []  // “行还没出来”的占位的开始时刻，从早到晚
+    private var lastFull: Double?     // 上一次完整读数的时刻
     private var credits: [(Double, Int)] = []  // [(时刻, 个数)]：累计请求数增加了、还没对上消失的行
     private var nextId = 1
     private var aborted = 0
@@ -92,6 +93,7 @@ public final class OmlxAdapter {
     /// 回到刚建好的状态（contexts、maxStreams 不动）。
     public func reset() {
         prev = nil
+        lastFull = nil
         uptime = nil
         epoch = nil
         rowList = []
@@ -184,6 +186,7 @@ public final class OmlxAdapter {
         if prev == nil {
             first(now: now, tables: tables)
             prev = totals
+            lastFull = now
             fitPlaceholders(now: now, tables: tables, active: active, waitingStatus: waitingStatus)
             let base = orEmpty(lastModel, defaultModel) ?? ""
             byModel = [base: [totals[1], totals[2], totals[3], totals[0]]]
@@ -197,7 +200,7 @@ public final class OmlxAdapter {
         if inc > 0 {
             credits.append((now, inc))
         }
-        let finished = matchFinished(now: now, tables: tables)
+        let finished = matchFinished(now: now, tables: tables, inc: inc, compInc: totals[3] - prev![3])
         // 4. 这次累计值的增量记到模型名下
         attribute(totals: totals, finished: finished)
         // 5. 消失超过 LIMBO_S 的行算中途断开；过期的累计请求数增量作废
@@ -205,6 +208,7 @@ public final class OmlxAdapter {
         // 6. 占位
         fitPlaceholders(now: now, tables: tables, active: active, waitingStatus: waitingStatus)
         prev = totals
+        lastFull = now
         return output(now: now, totals: totals, active: active, waitingStatus: waitingStatus, tables: tables)
     }
 
@@ -295,6 +299,9 @@ public final class OmlxAdapter {
                     start = now - elapsed(e.table, e.r)
                 } else if !placeholders.isEmpty {
                     start = placeholders.removeFirst()
+                } else if order == "generating", let t = lastFull, t < now - elapsed(e.table, e.r) {
+                    // 两次读数之间就预填充完了：只知道它在上次读数和开始解码之间到的，取中点（误差不超过半次轮询）
+                    start = (t + now - elapsed(e.table, e.r)) / 2
                 } else {
                     start = now - elapsed(e.table, e.r)
                 }
@@ -340,7 +347,7 @@ public final class OmlxAdapter {
 
     /// 这次没出现在表里的行：先记下消失的时刻；再用攒着的累计请求数增量对上，
     /// 解码行优先，同类里开始早的优先。对上的行算正常结束，从流表删掉。返回这些行。
-    private func matchFinished(now: Double, tables: [TableEntry]) -> [Row] {
+    private func matchFinished(now: Double, tables: [TableEntry], inc: Int, compInc: Int) -> [Row] {
         var gone: [Row] = []
         for row in rowList {
             if tables.contains(where: { $0.rid == row.rid }) { continue }
@@ -367,6 +374,14 @@ public final class OmlxAdapter {
             if n - use > 0 { kept.append((t, n - use)) }
         }
         credits = kept
+        // 这次消失的行都在这次读数里正常结束、而且都是解码行：累计输出的增量就是它们的最终输出，
+        // 解码秒数按“最终输出 / 最后一次读到的输出”同比放大（两次读数之间那段也算上）
+        var scale = 1.0
+        let out = finished.reduce(0) { $0 + $1.output }
+        if !finished.isEmpty, inc == finished.count, credit == inc, gone.count == inc, out > 0, compInc >= out,
+           finished.allSatisfy({ $0.phase == "decode" && $0.output > 0 }) {
+            scale = Double(compInc) / Double(out)
+        }
         for row in finished {
             removeRow(row.rid)
             if let ttft = row.ttftS {
@@ -376,7 +391,7 @@ public final class OmlxAdapter {
                 prefillS += max(0.0, ttft - queue)
             }
             if row.phase == "decode" {
-                decodeS += row.decS
+                decodeS += row.decS * scale
             }
         }
         return finished

@@ -150,7 +150,7 @@ private func g(_ rid: String, _ out: Int, _ elapsed: Double, _ prompt: Int) -> J
         #expect(rows[1]!["start"] == 1.5)  // 排队的行先编号
         #expect(rows[1]!["cached"] == 256)
         #expect(rows[1]!["filled"] == 512)
-        #expect(rows[2]!["start"] == 1.6)
+        #expect(rows[2]!["start"] == 0.8)  // 第一次见到就在解码：取上次读数（0）和开始解码（1.6）的中点
     }
 
     @Test func test_正常结束记首字和两项累计秒数() {
@@ -162,10 +162,25 @@ private func g(_ rid: String, _ out: Int, _ elapsed: Double, _ prompt: Int) -> J
         #expect(m["ttft_count"] == 1)
         #expect(almostEqual(m["ttft_sum"]!.number!, 2.0))                // 3.0 − 0.5 − 0.5
         #expect(almostEqual(h["prefill_seconds_total"]!.number!, 2.0))    // 没排队，首字时间全算预填充
-        #expect(almostEqual(h["decode_seconds_total"]!.number!, 1.5))
+        #expect(almostEqual(h["decode_seconds_total"]!.number!, 1.6875))  // 1.5 × 45 / 40：补上最后一次读数之后的那段
         #expect(h["tfpanel"]!["streams"] == [])
         #expect(h["completion_tokens_total"] == 45)
         #expect(h["aborted_total"] == 0)
+    }
+
+    @Test func test_短回答按最终输出补上解码秒数() {
+        _ = feed(0.0, status(), stats(model()))
+        _ = feed(1.0, status(active: 1), stats(model(generating: [g("a", 8, 0.08, 13)])))
+        let (h, _) = feed(1.25, status(req: 1, prompt: 13, comp: 15), stats(model()))!
+        #expect(almostEqual(h["decode_seconds_total"]!.number!, 0.15))   // 0.08 × 15 / 8
+    }
+
+    @Test func test_对不上个数时不补解码秒数() {
+        _ = feed(0.0, status(), stats(model()))
+        _ = feed(1.0, status(active: 2), stats(model(generating: [g("a", 8, 0.08, 13), g("b", 4, 0.04, 13)])))
+        // 累计请求数只加了 1：结束一行，另一行还在等，增量里分不清是谁的输出
+        let (h, _) = feed(1.25, status(req: 1, prompt: 13, comp: 15), stats(model()))!
+        #expect(almostEqual(h["decode_seconds_total"]!.number!, 0.08))
     }
 
     @Test func test_排队时间不算预填充秒数() {

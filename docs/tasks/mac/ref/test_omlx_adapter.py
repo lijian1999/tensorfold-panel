@@ -133,7 +133,7 @@ class TestOmlxAdapter(unittest.TestCase):
         self.assertEqual(m["ttft_count"], 1)
         self.assertAlmostEqual(m["ttft_sum"], 2.0)              # 3.0 − 0.5 − 0.5
         self.assertAlmostEqual(h["prefill_seconds_total"], 2.0)  # 没排队，首字时间全算预填充
-        self.assertAlmostEqual(h["decode_seconds_total"], 1.5)
+        self.assertAlmostEqual(h["decode_seconds_total"], 1.6875)  # 1.5 × 45 / 40：补上最后一次读数之后的那段
         self.assertEqual(h["tfpanel"]["streams"], [])
         self.assertEqual(h["completion_tokens_total"], 45)
         self.assertEqual(h["aborted_total"], 0)

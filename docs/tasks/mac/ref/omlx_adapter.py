@@ -154,7 +154,7 @@ class OmlxAdapter:
         inc = totals[0] - self._prev[0]
         if inc > 0:
             self._credits.append((now, inc))
-        finished = self._match_finished(now, tables)
+        finished = self._match_finished(now, tables, inc, totals[3] - self._prev[3])
         # 4. 这次累计值的增量记到模型名下
         self._attribute(totals, finished)
         # 5. 消失超过 LIMBO_S 的行算中途断开；过期的累计请求数增量作废
@@ -275,7 +275,7 @@ class OmlxAdapter:
         row["output"] = max(0, _int_or(r.get("generated_tokens")))
         row["dec_s"] = el
 
-    def _match_finished(self, now, tables):
+    def _match_finished(self, now, tables, inc, comp_inc):
         """这次没出现在表里的行：先记下消失的时刻；再用攒着的累计请求数增量对上，
         解码行优先，同类里开始早的优先。对上的行算正常结束，从流表删掉。返回这些行。"""
         gone = []
@@ -298,6 +298,13 @@ class OmlxAdapter:
             if n - use > 0:
                 kept.append((t, n - use))
         self._credits = kept
+        # 这次消失的行都在这次读数里正常结束、而且都是解码行：累计输出的增量就是它们的最终输出，
+        # 解码秒数按“最终输出 / 最后一次读到的输出”同比放大（两次读数之间那段也算上）
+        scale = 1.0
+        out = sum(r["output"] for r in finished)
+        if (finished and inc == len(finished) == credit == len(gone) and out > 0 and comp_inc >= out
+                and all(r["phase"] == "decode" and r["output"] > 0 for r in finished)):
+            scale = comp_inc / out
         for row in finished:
             del self._rows[row["rid"]]
             if row["ttft_s"] is not None:
@@ -306,7 +313,7 @@ class OmlxAdapter:
                 queue = max(0.0, row["pstart"] - row["start"]) if row["pstart"] is not None else 0.0
                 self._prefill_s += max(0.0, row["ttft_s"] - queue)
             if row["phase"] == "decode":
-                self._decode_s += row["dec_s"]
+                self._decode_s += row["dec_s"] * scale
         return finished
 
     def _attribute(self, totals, finished):

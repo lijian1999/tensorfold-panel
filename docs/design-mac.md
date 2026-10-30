@@ -146,7 +146,7 @@ oMLX 适配器每次读数读 `/api/status` 和 `/admin/api/stats`（合计约 1
 | `cached` | 预填充行的 `cached_tokens`；解码行沿用它在预填充时的值，没见过预填充就是 0（结束后的真实命中数从累计值的差得到） |
 | `filled` | 预填充行的 `processed`（不小于 `cached`）；解码行等于 `prompt` |
 | `output` | 解码行的 `generated_tokens`，预填充行为 0 |
-| `start` | 第一次见到这个请求时定下，以后不变：在 `waiting` 里见到 → 现在 − `elapsed_seconds`；否则如果有“行还没出来”的占位 → 取最早那个占位的开始时刻；否则 → 这次读数的时刻 |
+| `start` | 第一次见到这个请求时定下，以后不变：在 `waiting` 里见到 → 现在 − `elapsed_seconds`；否则如果有“行还没出来”的占位 → 取最早那个占位的开始时刻；否则如果第一次见到就在 `generating` 里（两次读数之间就预填充完了）→ 上次读数的时刻和开始解码的时刻（现在 − `elapsed_seconds`）的中点；否则 → 现在 − 已用秒数 |
 | `ttft_s` | 第一次在 `generating` 里见到时算：现在 − `elapsed_seconds` − `start`（误差在一次轮询以内） |
 
 **占位。** `active_requests` 比流表里预填充、解码的行数多出几个，就记几个“行还没出来”的占位，开始时刻是第一次多出来的那次读数。有占位时这次读数**不带 `tfpanel`**，采集器走降级路——和 vLLM 的“提示未知”同一个处理。占位最多存在约 1 秒，而短预填充阈值是 3 秒，所以画面上看不出来。
@@ -156,7 +156,7 @@ oMLX 适配器每次读数读 `/api/status` 和 `/admin/api/stats`（合计约 1
 - 同一次读数里 `total_requests` 增加了 → 算正常结束。增加了 k 而消失了 k 行以上时，取最早的 k 行算结束。
 - 否则 → 算中途断开：`aborted_total` 加 1；它的提示和已输出 token 记进“断开带走的用量”（见下面的 `usage_totals`），因为 oMLX 自己不算。
 
-**两项累计秒数。** 正常结束的行，把它最后一次读到的 `elapsed_seconds`（解码用时）加进 `decode_seconds_total`，把 `ttft_s` 减去排队时间加进 `prefill_seconds_total`。完成画面的“解码速度”“预填充速度”就是用这两项算的，误差在一次轮询以内。
+**两项累计秒数。** 正常结束的行，把它最后一次读到的 `elapsed_seconds`（解码用时）加进 `decode_seconds_total`（这次读数里结束的都是解码行、而且个数正好等于累计请求数的增量时，累计输出的增量就是它们的最终输出，解码用时按“最终输出 ÷ 最后一次读到的输出”同比放大，补上最后一次读数之后的那段；几十个 token 的短回答不这样补会快出一倍），把 `ttft_s` 减去排队时间加进 `prefill_seconds_total`。完成画面的“解码速度”“预填充速度”就是用这两项算的，误差在一次轮询以内。
 
 **统一读数各字段：**
 
