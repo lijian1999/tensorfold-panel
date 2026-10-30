@@ -13,6 +13,7 @@ let package = Package(
     targets: [
         .target(name: "PanelCore"),
         .target(name: "PanelRender", dependencies: ["PanelCore"]),
+        .executableTarget(name: "TFPanel", dependencies: ["PanelCore", "PanelRender"]),
         .testTarget(name: "PanelCoreTests", dependencies: ["PanelCore"], swiftSettings: testingPlugin),
         .testTarget(name: "PanelRenderTests", dependencies: ["PanelRender", "PanelCore"], swiftSettings: testingPlugin),
     ]
