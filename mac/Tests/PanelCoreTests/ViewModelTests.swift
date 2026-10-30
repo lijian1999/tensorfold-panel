@@ -304,8 +304,9 @@ private func checkFixture(_ name: String, _ now: Double = 100.0, _ overrides: [S
     @Test func test_done() {
         let view = checkFixture("done")
         #expect(view.stateName == "完成")
-        #expect(plain(view.stripRight) == "首字 0.09 s")
-        #expect(marks(view.stripRight) == [Mark("0.09", "strong")])
+        // 完成画面状态条不再写首字，改写内存
+        #expect(plain(view.stripRight) == "内存 94.2 / 121 GB")
+        #expect(marks(view.stripRight) == [Mark("94.2", "strong")])
         #expect(view.cap == "平均速度")
         #expect(view.unit == "tok/s")
         #expect(view.pill)
@@ -320,7 +321,7 @@ private func checkFixture(_ name: String, _ now: Double = 100.0, _ overrides: [S
         #expect(cards(view) == [
             CardRow("输出", "600", "tok", "提示 96 tok"),
             CardRow("缓存命中", "0", "%", "0 tok"),
-            CardRow("接受率", "81", "%", ""),
+            CardRow("首字", "0.09", "s", ""),
         ])
     }
 }
@@ -435,8 +436,8 @@ private func checkFixture(_ name: String, _ now: Double = 100.0, _ overrides: [S
         #expect(plain(view.stripRight) == "内存 94.2 / 121 GB")
     }
 
-    @Test func test_done_missing_acceptance() {
-        let last = merged(read("done")["last"] ?? [:], ["acceptance_rate": .null])
+    @Test func test_done_missing_ttft() {
+        let last = merged(read("done")["last"] ?? [:], ["ttft_s": .null])
         let view = checkFixture("done", 100.0, ["last": last])
         #expect(view.cards[2].value == "—")
         #expect(view.cards[2].pending)
@@ -547,6 +548,120 @@ private func checkFixture(_ name: String, _ now: Double = 100.0, _ overrides: [S
     @Test func test_model_falls_back_to_config() {
         let view = checkFixture("idle", 100.0, ["model": .null])
         #expect(view.stripLeft == "Qwen3.8-Flash-Next · TensorFold")
+    }
+}
+
+@Suite struct TestMacView {
+    // Mac 版画面：oMLX 引擎名、组织前缀、时区名、按模型单价、离线提示、模型加载中、完成画面首字格。
+
+    @Test func test_引擎名写oMLX() {
+        let view = checkFixture("idle", 100.0, ["engine": "omlx"])
+        #expect(view.stripLeft.hasSuffix(" · oMLX"))
+    }
+
+    @Test func test_模型名去掉组织前缀() {
+        let view = checkFixture("idle", 100.0,
+                                ["model": "mlx-community--Qwen3-ASR-0.6B-8bit", "engine": "omlx"])
+        #expect(view.stripLeft == "Qwen3-ASR-0.6B-8bit · oMLX")
+    }
+
+    @Test func test_时区显示名() {
+        #expect(zoneDisplayName("Asia/Shanghai") == "北京时间")
+        #expect(zoneDisplayName("America/Los_Angeles") == "太平洋时间")
+        #expect(zoneDisplayName("Asia/Tokyo") == "日本标准时间")
+        #expect(zoneDisplayName("Not/AZone") == "Not/AZone")
+    }
+
+    @Test func test_今日有模型没填单价() {
+        let today = merged(read("idle")["today"] ?? [:],
+                           ["priced_models": 1, "unpriced_models": 2])
+        let view = checkFixture("idle", 100.0, ["today": today])
+        // 主数字照旧是费用
+        #expect(view.bigInt == "$0")
+        #expect(view.bigDec == ".60")
+        #expect(plain(view.bar?.text ?? []) == "10月3日 · 太平洋时间 · 不含 2 个模型")
+        #expect(view.bar?.text.last == Seg("不含 2 个模型", "warn"))
+    }
+
+    @Test func test_今日一个模型都没填单价() {
+        let today = merged(read("idle")["today"] ?? [:],
+                           ["priced_models": 0, "unpriced_models": 1])
+        let view = checkFixture("idle", 100.0, ["today": today])
+        #expect(view.bigInt == "—")
+        #expect(view.bigDec == "")
+        #expect(view.bar?.text == [Seg("未填单价 · 在菜单栏里填", "warn")])
+    }
+
+    @Test func test_离线的今日费用按单价显示() {
+        let base = read("offline")["today"] ?? [:]
+        let v1 = checkFixture("offline", 100.0, ["today": merged(base, ["priced_models": 0, "unpriced_models": 1])])
+        #expect(cards(v1)[0] == CardRow("今日费用", "—", "", "未填单价"))
+        let v2 = checkFixture("offline", 100.0, ["today": merged(base, ["priced_models": 1, "unpriced_models": 3])])
+        // 值照旧，脚注标出不含几个模型
+        #expect(cards(v2)[0] == CardRow("今日费用", "$0.60", "", "不含 3 个模型"))
+    }
+
+    @Test func test_离线时显示引擎提示() {
+        let note = "oMLX 需要 API key · 在设置里填写"
+        let view = checkFixture("offline", 100.0, ["engine_note": .string(note)])
+        #expect(plain(view.stripRight) == note)
+        #expect(marks(view.stripRight) == [Mark(note, "warn")])
+        // 不加时照旧写上次模型
+        let view2 = checkFixture("offline")
+        #expect(plain(view2.stripRight) == "上次模型 Qwen3.8-Flash-Next · TensorFold")
+    }
+
+    @Test func test_模型加载中有预计时间() {
+        let loading: JSON = ["model": "mlx-community--Big-8bit", "elapsed_s": 3.42,
+                             "estimated_s": 24.0, "size_gb": 84.9]
+        let overrides: [String: JSON] = ["state": "loading", "engine": "omlx", "loading": loading]
+        let view = checkFixture("idle", 100.0, overrides)
+        #expect(view.stateName == "模型加载中")
+        #expect(plain(view.stripRight) == "Big-8bit · oMLX")
+        #expect(view.bigInt == "3")
+        #expect(view.bigDec == ".4")
+        #expect(view.bar?.kind == "prog")
+        #expect(almostEqual(view.bar?.frac ?? -1, 3.42 / 24, places: 3))
+        #expect(plain(view.bar?.text ?? []) == "预计 24 s · 剩余约 21 s")
+        #expect(cards(view) == [
+            CardRow("模型大小", "84.9", "GB", ""),
+            CardRow("等待中", "1", "个", "加载完开始"),
+            CardRow("内存", "94.2", "GB", "共 121 GB"),
+        ])
+        #expect(view.lanes.waiting == 1)
+        // 已用时不小于 10 秒：只写整数部分
+        let view2 = checkFixture("idle", 100.0,
+                                 ["state": "loading", "engine": "omlx",
+                                  "loading": merged(loading, ["elapsed_s": 12.7])])
+        #expect(view2.bigInt == "12")
+        #expect(view2.bigDec == "")
+    }
+
+    @Test func test_模型加载中没有预计时间() {
+        let loading: JSON = ["model": "mlx-community--Big-8bit", "elapsed_s": 3.42,
+                             "estimated_s": .null, "size_gb": .null]
+        let view = checkFixture("idle", 100.0, ["state": "loading", "engine": "omlx", "loading": loading])
+        #expect(view.bar?.kind == "prog")
+        #expect(view.bar?.frac == 0)
+        #expect(plain(view.bar?.text ?? []) == "首次加载 · 没有预计时间")
+        #expect(view.cards[0].label == "模型大小")
+        #expect(view.cards[0].value == "—")
+        #expect(view.cards[0].pending)
+    }
+
+    @Test func test_完成画面第三格是首字() {
+        let view = checkFixture("done")
+        #expect(view.cards[2].label == "首字")
+        #expect(view.cards[2].value == "0.09")
+        #expect(view.cards[2].unit == "s")
+        #expect(plain(view.stripRight).hasPrefix("内存 "))
+    }
+
+    @Test func test_oMLX不写外挂未生效() {
+        let view = checkFixture("idle", 100.0, ["hook": "missing", "engine": "omlx"])
+        #expect(!plain(view.stripRight).contains("外挂未生效"))
+        #expect(plain(view.stripRight) == "内存 94.2 / 121 GB")
+        #expect(view.stripLeft == "Qwen3.8-Flash-Next · oMLX")
     }
 }
 
