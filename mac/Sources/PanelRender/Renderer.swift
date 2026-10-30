@@ -271,7 +271,8 @@ public final class Renderer {
         var s = text
         while !s.isEmpty {
             s.removeLast()
-            let t = s.trimmingCharacters(in: .whitespaces) + "…"
+            // 截在“·”分隔处时连它一起去掉，不留“· …”
+            let t = s.trimmingCharacters(in: CharacterSet(charactersIn: " ·")) + "…"
             if _width(nil, t, size, false) <= maxW { return t }
         }
         return ""
