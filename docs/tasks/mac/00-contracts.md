@@ -156,3 +156,115 @@ public final class Animator {
 - 断言：`assertEqual(a, b)` → `#expect(a == b)`；`assertAlmostEqual(a, b, places=n)` → `#expect(almostEqual(a, b, places: n))`（不写 `places` 时 `places: 7`）；`assertAlmostEqual(a, b, delta=d)` → `#expect(abs(a - b) <= d)`；`assertIsNone(x)` → `#expect(x == nil)` 或 `#expect(x.isNone)`；`assertIs(x, True)` → `#expect(x == .bool(true))`；`assertTrue`/`assertFalse` → `#expect(...)`/`#expect(!...)`；`subTest` 的循环 → 普通循环，把循环变量写进 `#expect` 的说明里。断言里给的说明文字也搬过来。
 - **断言不改，数值不改**。Python 断言的是“能转成 JSON”这类 Python 特有的东西时，换成 Swift 里意思最接近的断言（例如 `JSON.parse(snap.serialized()) == snap`），并在结果报告里逐条列出。
 - 读 `fixtures/` 用 `loadFixture("decode.json")`。要临时目录时用 `FileManager.default.temporaryDirectory` 下新建一个唯一的子目录，测试结束删掉。
+
+## 8. 第二批（O 系列）：oMLX、按模型记账、Mac 版画面
+
+第二批在第一批的基础上接 oMLX、把今日用量改成按模型记账、把画面改成 Mac 版。设计见 `docs/design-mac.md` 的“引擎：oMLX”“引擎的选择”“费用单价”“时区”几节，画面以原型 `docs/dashboard-prototype.html` 为准。本节和前面几节冲突时以本节为准。
+
+### 8.1 文件
+
+| 文件 | 内容 | 谁写 |
+| --- | --- | --- |
+| `mac/Sources/PanelCore/Engine.swift` | oMLX 适配器 `OmlxAdapter`（`docs/tasks/mac/ref/omlx_adapter.py` 的翻译） | 任务 O1，新建 |
+| `mac/Sources/PanelCore/Sources.swift` | HTTP 读取、`OmlxReader`、读 oMLX 设置文件 | 任务 O1，新建 |
+| `mac/Sources/PanelCore/Config.swift` | 去掉三个单价字段，加按模型的单价 | 任务 O2 |
+| `mac/Sources/PanelCore/Usage.swift` | 按模型记账 | 任务 O2 |
+| `mac/Sources/PanelCore/Collector.swift` | 把按模型的累计值交给账本；“模型加载中”状态 | 任务 O2 |
+| `mac/Sources/PanelCore/ViewModel.swift` | Mac 版画面的改动 | 任务 O3 |
+| `docs/tasks/mac/ref/` | 参考实现和它的测试、回放脚本（只读） | 已有 |
+| `fixtures/omlx/<场景>.jsonl`、`<场景>.expected.jsonl` | oMLX 实录的读数序列和参考实现的输出（只读） | 已有 |
+
+### 8.2 适配器（O1，`Engine.swift`）
+
+```swift
+public final class OmlxAdapter {
+    public init(maxStreams: Int = 8)
+    public var maxStreams: Int
+    public private(set) var contexts: [String: Int]          // 模型名 → 上下文上限
+    public func reset()
+    public func setModels(_ models: JSON?)                    // /v1/models 的 data 数组
+    public var modelName: String? { get }                     // Python 的 model_name 属性
+    public func rows() -> [JSON]
+    public func feed(now: Double, wall: Double, status: JSON?, stats: JSON?) -> (health: JSON, metrics: JSON)?
+}
+```
+
+行为照参考实现：`status`、`stats` 不是 JSON 对象时，分别按 Python 的“不是 dict”处理。
+
+### 8.3 读取（O1，`Sources.swift`）
+
+```swift
+public struct HTTPResult: Sendable, Equatable {
+    public var status: Int
+    public var body: Data
+    public init(status: Int, body: Data)
+}
+
+/// 发 GET 请求的东西；测试里换成假的
+public protocol HTTPTransport: AnyObject {
+    /// 连不上、超时返回 nil；连上了就返回状态码和内容（不管状态码是多少）
+    func get(_ path: String, headers: [String: String]) -> HTTPResult?
+}
+
+public final class URLSessionTransport: HTTPTransport {
+    public init(baseURL: String, timeout: Double = 0.5)   // baseURL 如 "127.0.0.1:8000"，没写协议时补 "http://"
+}
+
+public enum EngineIssue: String, Sendable {
+    case none, unreachable, notOmlx, needsKey
+    public var message: String? { get }   // none → nil；unreachable → "未连接"；notOmlx → "这个地址上不是 oMLX"；needsKey → "oMLX 需要 API key · 在设置里填写"
+}
+
+public final class OmlxReader {
+    public init(transport: HTTPTransport, apiKey: String? = nil, maxStreams: Int = 8)
+    public var apiKey: String?
+    public private(set) var issue: EngineIssue          // 最近一次读的结果
+    public private(set) var modelIDs: [String]          // /v1/models 里的模型名，按原顺序
+    public var modelName: String? { get }               // 适配器的 modelName
+    public func read(now: Double, wall: Double) -> (health: JSON, metrics: JSON)?   // nil = 这次读不到
+    public func reset()                                  // 换地址、换 key 后调用：适配器清空、重新认引擎
+}
+
+public func omlxApiKey(settingsPath: String = "~/.omlx/settings.json") -> String?
+public func omlxMaxStreams(settingsPath: String = "~/.omlx/settings.json") -> Int
+```
+
+### 8.4 统一读数的新字段（适配器给出，采集器使用）
+
+| 字段 | 内容 |
+| --- | --- |
+| `usage_totals` | `{prompt, cached, completion, requests}`：交给账本的四项累计值（已有，Spark 版 vLLM 也用） |
+| `usage_by_model` | `{模型名: {prompt, cached, completion, requests}}`：按模型分开的同样四项 |
+| `loading` | 有模型在加载时才有：`{model, elapsed_s, estimated_s, size_gb}`，后两项可以是 null |
+
+### 8.5 单价和账本（O2）
+
+```swift
+public struct ModelPrice: Equatable, Sendable, Codable {
+    public var input: Double     // 美元 / 百万 token
+    public var cached: Double
+    public var output: Double
+    public init(input: Double, cached: Double, output: Double)
+}
+```
+
+- `Config` 去掉 `priceInput`、`priceCached`、`priceOutput`，加 `public var prices: [String: ModelPrice] = [:]`（键是 oMLX 的模型名原文，如 `Qwen3-4B-Instruct-2507-4bit`）。
+- `UsageLedger` 加 `public func apply(config: Config)`：换单价、换时区，立刻生效。
+- 交给 `UsageLedger.update` 的 JSON 除了原来的 `prompt`、`cached`、`completion`、`requests`、`epoch`，可以再带 `by_model`（即 `usage_by_model`）和 `model`（字符串，当前模型名）。
+- `today()` 返回的 JSON 在原来的键（`date`、`prompt_tokens`、`cached_tokens`、`completion_tokens`、`requests`、`cost`）之外加：
+  - `by_model`：`{模型名: {prompt_tokens, cached_tokens, completion_tokens, requests, cost}}`，没填单价的模型 `cost` 是 null；
+  - `priced_models`：今天用过、填了单价的模型个数（整数）；
+  - `unpriced_models`：今天用过、没填单价的模型个数（整数）。
+  - `cost` 只算填了单价的模型。
+
+### 8.6 快照的新内容
+
+- `state` 多一个值 `"loading"`（模型加载中，O2 在采集器里定）。这时快照多一个键 `loading`，内容照抄统一读数的 `loading`；其他状态没有这个键。
+- `engine_note`：app 在引擎有问题时放进快照的一句话（`EngineIssue.message`），采集器不管它；画面在离线时显示它（O3）。
+
+### 8.7 画面（O3，`ViewModel.swift`）
+
+```swift
+/// 时区的中文显示名：Asia/Shanghai → 北京时间，America/Los_Angeles → 太平洋时间，其他用系统给的中文名
+public func zoneDisplayName(_ identifier: String) -> String
+```
