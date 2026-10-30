@@ -264,6 +264,12 @@ public final class Collector {
                 forUsage = ["prompt": .int(prompt), "cached": .int(cached), "completion": .int(c), "requests": .int(requests)]
             }
             if let e = epoch { forUsage["epoch"] = e }
+            // oMLX/vLLM 的读数把四项累计值按模型分开：一并交给账本
+            if let byModel = health["usage_by_model"], byModel.object != nil {
+                forUsage["by_model"] = byModel
+            }
+            // 采集器记着的当前模型名（最近一次非空的 model 参数）也交给账本，供账本兑底
+            if let m = _model, !m.isEmpty { forUsage["model"] = .string(m) }
             try? usage.update(.object(forUsage))
         }
 
@@ -349,7 +355,15 @@ public final class Collector {
         // 2.11 首字的精确值
         _ttftExact()
 
-        let snap = _buildSnapshot(state, decode, prefill, running)
+        var snap = _buildSnapshot(state, decode, prefill, running)
+        // 模型加载中（oMLX）：只有空闲/预填充时给出去的快照改成 loading 并带上 loading 内容；
+        // 采集器内部记的状态（忙碌段、一轮、完成时刻等）照旧按原来的状态算。
+        if (state == "idle" || state == "prefill"), let loading = health["loading"], loading.object != nil,
+           var o = snap.object {
+            o["state"] = .string("loading")
+            o["loading"] = loading
+            snap = .object(o)
+        }
         _prev = _Prev(t: now, running: running, arrive: arrive, c: c, requests: requests,
                       prompt: prompt, cached: cached, prefillS: prefillS, decodeS: decodeS,
                       drafted: drafted, accepted: accepted, rows: _rows,
