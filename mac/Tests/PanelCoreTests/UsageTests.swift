@@ -31,6 +31,18 @@ private let TOTALS: JSON = ["prompt": 1000, "cached": 400, "completion": 50, "re
 private let BIGGER: JSON = ["prompt": 1500, "cached": 600, "completion": 80, "requests": 5]
 private let SMALLER: JSON = ["prompt": 120, "cached": 0, "completion": 30, "requests": 1]
 
+/// 带原来默认单价的配置（单价改成按模型填后，原来的默认一组写在无名模型 "" 名下）。
+private func pricedConfig() -> Config {
+    var c = Config()
+    c.prices[""] = ModelPrice(input: 0.15, cached: 0.016, output: 0.47)
+    return c
+}
+
+/// by_model 里一个模型的四项（键同 SOURCE_KEYS），四项都写全。
+private func bm(_ prompt: Int, _ cached: Int, _ completion: Int, _ requests: Int) -> JSON {
+    ["prompt": .int(prompt), "cached": .int(cached), "completion": .int(completion), "requests": .int(requests)]
+}
+
 /// 假时钟：时间戳由测试拨。
 private final class Clock {
     var ts: Double
@@ -51,7 +63,7 @@ private final class Harness {
     private(set) var clock = Clock(NOON)
     init() { dir = newTempDir() }
 
-    func ledger(ts: Double = NOON, config: Config = Config(), interval: Double = 10.0,
+    func ledger(ts: Double = NOON, config: Config = pricedConfig(), interval: Double = 10.0,
                 stateDir: String? = nil) -> UsageLedger {
         let c = Clock(ts)
         clock = c
@@ -131,7 +143,7 @@ private func mtime(_ path: String) -> Date {
     @Test func test_cost_with_other_price() {
         // 改输出单价，费用跟着变。
         let totals: JSON = ["prompt": 8260391, "cached": 5443627, "completion": 185305, "requests": 98]
-        var cfg = Config(); cfg.priceOutput = 1.0
+        var cfg = pricedConfig(); cfg.prices[""] = ModelPrice(input: 0.15, cached: 0.016, output: 1.0)
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger(config: cfg)
         ledger.update(["prompt": 0, "cached": 0, "completion": 0, "requests": 0])
@@ -159,13 +171,13 @@ private func mtime(_ path: String) -> Date {
         // 副屏程序重启：新账本接着上次的累计值补上这段空隙的用量。
         let dir = newTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let clock = Clock(NOON)
-        let first = UsageLedger(config: Config(), clock: { clock.ts }, stateDir: dir)
+        let first = UsageLedger(config: pricedConfig(), clock: { clock.ts }, stateDir: dir)
         first.update(TOTALS)
         first.update(BIGGER)
         first.flush()
         #expect(four(first.today()) == (500, 200, 30, 2))
 
-        let second = UsageLedger(config: Config(), clock: { clock.ts }, stateDir: dir)
+        let second = UsageLedger(config: pricedConfig(), clock: { clock.ts }, stateDir: dir)
         second.update(["prompt": 2000, "cached": 900, "completion": 120, "requests": 8])
         // 之前的 500/200/30/2 加上这段空隙里的 500/300/40/3
         #expect(four(second.today()) == (1000, 500, 70, 5))
@@ -323,7 +335,7 @@ private func mtime(_ path: String) -> Date {
 @Suite struct TestTimezone {
     @Test func test_unknown_timezone_falls_back() {
         // 时区名无效时按太平洋时间算日期（和 UTC 差一天，能看出来）。
-        var cfg = Config(); cfg.timezone = "不存在/时区"
+        var cfg = pricedConfig(); cfg.timezone = "不存在/时区"
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger(ts: EVENING, config: cfg)
         #expect(ledger.today()["date"] == .string("2026-10-03"))
@@ -331,7 +343,7 @@ private func mtime(_ path: String) -> Date {
 
     @Test func test_config_timezone_is_used() {
         // 同一个时刻，按 UTC 算是 10 月 4 日。
-        var cfg = Config(); cfg.timezone = "UTC"
+        var cfg = pricedConfig(); cfg.timezone = "UTC"
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger(ts: EVENING, config: cfg)
         #expect(ledger.today()["date"] == .string("2026-10-04"))
@@ -414,5 +426,176 @@ private func mtime(_ path: String) -> Date {
             ledger.update(plus(BIGGER, ["epoch": bad]))
             #expect(four(ledger.today()) == (500, 200, 30, 2), "bad=\(bad)")
         }
+    }
+}
+
+// MARK: - 按模型记账（O2）
+
+@Suite struct TestByModel {
+    @Test func test_按模型分开记() {
+        // 每个模型分开记，今天的合计是各模型相加。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        // 第一次读只记基线
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0), "B": bm(0, 0, 0, 0)]]))
+        #expect(four(ledger.today()) == (0, 0, 0, 0))
+        let next: JSON = ["prompt": 1150, "cached": 430, "completion": 65, "requests": 7]
+        ledger.update(plus(next, ["by_model": ["A": bm(100, 10, 5, 1), "B": bm(50, 20, 10, 3)]]))
+        let today = ledger.today()
+        #expect(today["by_model"]?["A"]?["prompt_tokens"] == .int(100))
+        #expect(today["by_model"]?["B"]?["prompt_tokens"] == .int(50))
+        #expect(today["prompt_tokens"] == .int(150), "合计是各模型相加")
+    }
+
+    @Test func test_只算填了单价的模型() {
+        // 用量同上一个测试，只给 A 填单价：费用只算 A，B 单独数出来。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        var cfg = Config()
+        cfg.prices["A"] = ModelPrice(input: 0.15, cached: 0.016, output: 0.47)
+        let ledger = h.ledger(config: cfg)
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0), "B": bm(0, 0, 0, 0)]]))
+        let next: JSON = ["prompt": 1150, "cached": 430, "completion": 65, "requests": 7]
+        ledger.update(plus(next, ["by_model": ["A": bm(100, 10, 5, 1), "B": bm(50, 20, 10, 3)]]))
+        let today = ledger.today()
+        #expect(today["priced_models"] == .int(1))
+        #expect(today["unpriced_models"] == .int(1))
+        #expect(today["by_model"]?["B"]?["cost"] == .null, "没填单价的模型 cost 是 null")
+        // A 的费用：((100−10)×0.15 + 10×0.016 + 5×0.47) ÷ 1_000_000
+        let aCost = ((100.0 - 10) * 0.15 + 10 * 0.016 + 5 * 0.47) / 1_000_000
+        #expect(almostEqual(today["cost"]!.double!, aCost, places: 9), "今日费用只算填了单价的模型")
+    }
+
+    @Test func test_按模型的和对不上时记在当前模型名下() {
+        // 合计 prompt 增加 100，各模型加起来只有 60：整个 100 记在 model 给的 C 名下。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0), "B": bm(0, 0, 0, 0)],
+                                    "model": .string("C")]))
+        let next = plus(TOTALS, ["prompt": .int(1100)])
+        ledger.update(plus(next, ["by_model": ["A": bm(60, 0, 0, 0), "B": bm(0, 0, 0, 0)],
+                                  "model": .string("C")]))
+        let today = ledger.today()
+        #expect(today["by_model"]?["C"]?["prompt_tokens"] == .int(100))
+        #expect(today["prompt_tokens"] == .int(100))
+    }
+
+    @Test func test_没有按模型的累计值时记在当前模型名下() {
+        // 不带 by_model、带 model：增量全记在那个模型名下。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        ledger.update(plus(TOTALS, ["model": .string("D")]))
+        ledger.update(plus(BIGGER, ["model": .string("D")]))
+        var today = ledger.today()
+        #expect(today["by_model"]?["D"]?["prompt_tokens"] == .int(500))
+        #expect(today["by_model"]?["D"]?["requests"] == .int(2))
+        // 既不带 by_model 也不带 model：记在 "" 名下（另一个临时目录，新账本）。
+        let h2 = Harness(); defer { try? FileManager.default.removeItem(atPath: h2.dir) }
+        let ledger2 = h2.ledger()
+        ledger2.update(TOTALS)
+        ledger2.update(BIGGER)
+        today = ledger2.today()
+        #expect(today["by_model"]?[""]?["prompt_tokens"] == .int(500))
+        #expect(today["by_model"]?[""]?["requests"] == .int(2))
+    }
+
+    @Test func test_读第1版的文件() {
+        // 第 1 版的文件只有四项合计：有用量时记在 "" 名下。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        h.writeUsage("""
+        {"version": 1, "date": "2026-10-03", "prompt_tokens": 1000, "cached_tokens": 0, \
+        "completion_tokens": 0, "requests": 0, \
+        "last_totals": {"prompt": 0, "cached": 0, "completion": 0, "requests": 0}}
+        """)
+        let ledger = h.ledger()
+        let today = ledger.today()
+        #expect(today["by_model"]?[""]?["prompt_tokens"] == .int(1000))
+        #expect(today["prompt_tokens"] == .int(1000))
+    }
+
+    @Test func test_程序重启后按模型接着算() {
+        // 新账本从文件里的 by_model、last_by_model 接着算。
+        let dir = newTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let clock = Clock(NOON)
+        let first = UsageLedger(config: pricedConfig(), clock: { clock.ts }, stateDir: dir)
+        first.update(plus(TOTALS, ["by_model": ["A": bm(600, 200, 20, 1), "B": bm(400, 200, 30, 2)]]))
+        let r2: JSON = ["prompt": 1200, "cached": 500, "completion": 70, "requests": 6]
+        first.update(plus(r2, ["by_model": ["A": bm(800, 300, 40, 3), "B": bm(400, 200, 30, 3)]]))
+        first.flush()
+        #expect(first.today()["by_model"]?["A"]?["prompt_tokens"] == .int(200))
+        #expect(first.today()["by_model"]?["B"]?["requests"] == .int(1))
+
+        let second = UsageLedger(config: pricedConfig(), clock: { clock.ts }, stateDir: dir)
+        let r3 = plus(r2, ["prompt": .int(1210)])
+        second.update(plus(r3, ["by_model": ["A": bm(810, 300, 40, 3), "B": bm(400, 200, 30, 3)]]))
+        let today = second.today()
+        #expect(today["by_model"]?["A"]?["prompt_tokens"] == .int(210), "A 比重启前多 10")
+        #expect(today["by_model"]?["B"]?["requests"] == .int(1), "B 不变")
+        #expect(today["by_model"]?["B"]?["prompt_tokens"] == .int(0))
+
+        let saved = JSON.parse(try! Data(contentsOf: URL(fileURLWithPath: dir + "/usage.json")))!
+        #expect(saved["version"] == .int(2))
+        #expect(saved["by_model"]?.object != nil)
+        #expect(saved["last_by_model"]?.object != nil)
+    }
+
+    @Test func test_换日时历史行带各模型明细() {
+        // 换日那一行：合计 + 有单价的模型的费用之和 + 各模型明细（含各自 cost 或 null）。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        var cfg = Config()
+        cfg.prices["A"] = ModelPrice(input: 0.15, cached: 0.016, output: 0.47)
+        let ledger = h.ledger(ts: LATE_NIGHT, config: cfg)
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0), "B": bm(0, 0, 0, 0)]]))
+        ledger.update(plus(BIGGER, ["by_model": ["A": bm(300, 100, 20, 1), "B": bm(200, 100, 10, 1)]]))
+
+        h.clock.ts = MIDNIGHT
+        #expect(ledger.today()["date"] == .string("2026-10-04"))
+        let lines = readHistory(h.dir)
+        #expect(lines.count == 1)
+        let row = lines[0]
+        #expect(row["date"] == .string("2026-10-03"))
+        #expect(row["prompt_tokens"] == .int(500), "前五项是合计")
+        #expect(row["by_model"]?["A"]?["cost"]?.number != nil, "填了单价的模型 cost 是数")
+        #expect(row["by_model"]?["B"]?["cost"] == .null, "没填单价的模型 cost 是 null")
+        // 这行的 cost 等于 A 的费用：((300−100)×0.15 + 100×0.016 + 20×0.47) ÷ 1_000_000
+        let aCost = ((300.0 - 100) * 0.15 + 100 * 0.016 + 20 * 0.47) / 1_000_000
+        #expect(almostEqual(row["cost"]!.double!, aCost, places: 9))
+    }
+
+    @Test func test_改单价和时区立刻生效() {
+        // apply(config:)：换单价立刻重算今天；换时区后下一次换日检查按新时区处理。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: EVENING)   // 太平洋时间 2026-10-03，UTC 已是 2026-10-04
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0)]]))
+        let r2: JSON = ["prompt": 1200, "cached": 500, "completion": 70, "requests": 5]
+        ledger.update(plus(r2, ["by_model": ["A": bm(200, 100, 20, 2)]]))
+        #expect(ledger.today()["cost"] == .double(0.0), "没填单价时今日费用是 0")
+
+        var cfg = Config()
+        cfg.prices["A"] = ModelPrice(input: 0.15, cached: 0.016, output: 0.47)
+        ledger.apply(config: cfg)
+        // A 的费用：((200−100)×0.15 + 100×0.016 + 20×0.47) ÷ 1_000_000
+        let aCost = ((200.0 - 100) * 0.15 + 100 * 0.016 + 20 * 0.47) / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, aCost, places: 9), "填上单价后立刻重算")
+
+        cfg.timezone = "UTC"
+        ledger.apply(config: cfg)
+        let today = ledger.today()
+        #expect(today["date"] == .string("2026-10-04"), "换到新时区已是第二天")
+        #expect(today["prompt_tokens"] == .int(0), "换日后清零")
+        let lines = readHistory(h.dir)
+        #expect(lines.count == 1)
+        #expect(lines[0]["date"] == .string("2026-10-03"))
+    }
+
+    @Test func test_启动标记差30秒以内算同一次启动() {
+        // oMLX 的启动时刻是算出来的，重启后差一两秒：30 秒以内不算换引擎。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        ledger.update(plus(TOTALS, ["epoch": .double(1000.0)]))   // 第一次：只记基线
+        ledger.update(plus(BIGGER, ["epoch": .double(1001.0)]))   // 差 1 秒：按差值记
+        #expect(four(ledger.today()) == (500, 200, 30, 2))
+        let r3: JSON = ["prompt": 1600, "cached": 700, "completion": 90, "requests": 6]
+        ledger.update(plus(r3, ["epoch": .double(1100.0)]))       // 差 99 秒：整个算
+        #expect(four(ledger.today()) == (500 + 1600, 200 + 700, 30 + 90, 2 + 6))
     }
 }

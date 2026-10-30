@@ -1186,3 +1186,40 @@ fileprivate func vllm_long_scene(usage: FakeUsage? = nil) -> (Collector, Scene) 
         #expect(snap["engine"] == "vllm")
     }
 }
+
+// MARK: - 19. oMLX：按模型的累计值交给账本、模型加载中状态（O2）
+
+@Suite struct TestOmlxSnapshot {
+    @Test func test_按模型的累计值交给账本() {
+        // health 带 usage_by_model：账本收到的 JSON 里有同样的 by_model 和当前模型名。
+        let usage = FakeUsage()
+        let collector = Collector(config: Config(), usage: usage)
+        let byModel: JSON = ["A": ["prompt": 160100, "cached": 30000, "completion": 2000, "requests": 20]]
+        let h = dict(vhealth(), ["usage_by_model": byModel])
+        _ = collector.feed(now: 1.0, health: h, model: "A")
+        #expect(usage.calls.count == 1)
+        #expect(usage.calls[0]["by_model"] == byModel)
+        #expect(usage.calls[0]["model"] == .string("A"))
+    }
+
+    @Test func test_加载模型时状态是loading() {
+        // 空闲读数带 loading：给出去的快照状态是 loading，内容照抄；不带时没有这个键。
+        let collector = Collector(config: Config())
+        let loading: JSON = ["model": "A", "elapsed_s": 0.5, "estimated_s": 2.0, "size_gb": 2.2]
+        let snap = collector.feed(now: 1.0, health: dict(health(BASE), ["loading": loading]))
+        #expect(snap["state"] == .string("loading"))
+        #expect(snap["loading"] == loading)
+        let snap2 = collector.feed(now: 2.0, health: health(BASE))
+        #expect(snap2["state"] == .string("idle"))
+        #expect(snap2["loading"] == nil, "不带 loading 时快照里没有这个键")
+    }
+
+    @Test func test_解码时不显示加载() {
+        // 有流在解码时 loading 不算状态：还是 decode，也没有 loading 键。
+        let collector = Collector(config: Config())
+        let loading: JSON = ["model": "A", "elapsed_s": 0.1, "estimated_s": .null, "size_gb": .null]
+        let snap = collector.feed(now: 1.0, health: dict(health(BASE, running: 1, dec: 1), ["loading": loading]))
+        #expect(snap["state"] == .string("decode"))
+        #expect(snap["loading"] == nil)
+    }
+}

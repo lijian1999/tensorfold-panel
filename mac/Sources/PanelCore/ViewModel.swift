@@ -59,6 +59,17 @@ private func _ceilAtLeast1(_ x: Double) -> Int {
     return max(1, Int(ceil(x)))
 }
 
+/// 时区的中文显示名：Asia/Shanghai → 北京时间，America/Los_Angeles → 太平洋时间，其他用系统给的中文名。
+public func zoneDisplayName(_ identifier: String) -> String {
+    if identifier == "Asia/Shanghai" { return "北京时间" }
+    if identifier == "America/Los_Angeles" { return "太平洋时间" }
+    if let name = TimeZone(identifier: identifier)?.localizedName(for: .generic, locale: Locale(identifier: "zh_CN")),
+       !name.isEmpty {
+        return name
+    }
+    return identifier
+}
+
 public final class ViewModel {
     /// 把一份指标快照变成一个 View。
     ///
@@ -107,6 +118,8 @@ public final class ViewModel {
             prefill(&view, snap, rm, memCard)
         } else if state == "decode" {
             decode(&view, snap, rm, memText)
+        } else if state == "loading" {
+            loading(&view, snap, memCard)
         } else {
             // 完成，以及认不出的状态：都按完成画
             done(&view, snap, rm, memText)
@@ -154,12 +167,22 @@ public final class ViewModel {
                      waiting: _trunc(_numD(lanesJSON["waiting"])))
     }
 
-    /// 显示用的模型名：只取最后一个 '/' 后面的那段。
+    /// 原始模型名 → 显示名：取最后一个 '/' 后面的那段，再去掉最后一个 '--' 及它前面的部分
+    /// （mlx-community--Qwen3-ASR-0.6B-8bit → Qwen3-ASR-0.6B-8bit）；去掉后为空就不去。
+    private func displayName(_ raw: String) -> String {
+        let last = raw.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? raw
+        let base = last.isEmpty ? raw : last
+        if let r = base.range(of: "--", options: .backwards) {
+            let stripped = String(base[r.upperBound...])
+            if !stripped.isEmpty { return stripped }
+        }
+        return base
+    }
+
+    /// 显示用的模型名。
     private func modelName(_ snap: JSON) -> String {
         let m = snap["model"]?.string ?? ""
-        let model = m.isEmpty ? config.modelName : m
-        let last = model.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? model
-        return last.isEmpty ? model : last
+        return displayName(m.isEmpty ? config.modelName : m)
     }
 
     /// 引擎名：认不出的（包括没有这个键）都是 None。
@@ -167,6 +190,7 @@ public final class ViewModel {
         let engine = snap["engine"]
         if engine?.string == "tensorfold" { return "TensorFold" }
         if engine?.string == "vllm" { return "vLLM" }
+        if engine?.string == "omlx" { return "oMLX" }
         return nil
     }
 
@@ -275,7 +299,9 @@ public final class ViewModel {
 
         let model = modelName(snap)
         let engine = engineName(snap)
-        if snap["hook"]?.string == "missing" && snap["engine"]?.string != "vllm" {
+        // oMLX 不用外挂：只有既不是 vLLM 也不是 oMLX 时才提示外挂未生效
+        let engineStr = snap["engine"]?.string
+        if snap["hook"]?.string == "missing" && engineStr != "vllm" && engineStr != "omlx" {
             // 写了“外挂未生效”就不再重复写引擎名
             view.stripLeft = model
             view.stripRight = segJoin([Seg("外挂未生效", "warn"), Seg(" · ")] + memoryText(snap))
@@ -284,25 +310,42 @@ public final class ViewModel {
             view.stripRight = segJoin(memoryText(snap))
         }
 
+        // 单价按模型填：一个都没填时整行换成提示；有的没填时在日期后面标出不含几个模型
+        let priced = _num(todayJSON["priced_models"])
+        let unpriced = _num(todayJSON["unpriced_models"])
+        let none = (unpriced.number ?? 0) > 0 && (priced.number ?? 0) == 0
+
         let currency = config.currency
         view.cap = "今日费用"
         view.unit = currency == "$" ? "美元" : currency
-        let cost = costFmt(_numD(todayJSON["cost"]), currency: currency)
-        if let dot = cost.firstIndex(of: ".") {
-            view.bigInt = String(cost[..<dot])
-            view.bigDec = String(cost[dot...])
-        } else {
-            view.bigInt = cost
+        if none {
+            view.bigInt = "—"
             view.bigDec = ""
+        } else {
+            let cost = costFmt(_numD(todayJSON["cost"]), currency: currency)
+            if let dot = cost.firstIndex(of: ".") {
+                view.bigInt = String(cost[..<dot])
+                view.bigDec = String(cost[dot...])
+            } else {
+                view.bigInt = cost
+                view.bigDec = ""
+            }
         }
         view.bigWhole = true
         view.bigSize = "cost"
         view.arc = "blank"
         view.arcTarget = nil
-        let zone = config.timezone
-        let zoneName = zone == "America/Los_Angeles" ? "太平洋时间" : zone
+        let zoneName = zoneDisplayName(config.timezone)
         let dateText = dateLabel(todayJSON["date"]?.string ?? "")
-        view.bar = Bar(kind: "note", frac: 0.0, level: "normal", text: [Seg("\(dateText) · \(zoneName)")])
+        let barText: [Seg]
+        if none {
+            barText = [Seg("未填单价 · 在菜单栏里填", "warn")]
+        } else if (unpriced.number ?? 0) > 0 {
+            barText = [Seg("\(dateText) · \(zoneName) · "), Seg("不含 \(_pyStr(unpriced)) 个模型", "warn")]
+        } else {
+            barText = [Seg("\(dateText) · \(zoneName)")]
+        }
+        view.bar = Bar(kind: "note", frac: 0.0, level: "normal", text: barText)
 
         let prompt = _numD(todayJSON["prompt_tokens"])
         let cached = _numD(todayJSON["cached_tokens"])
@@ -323,13 +366,32 @@ public final class ViewModel {
         let model = modelName(snap)
         let engine = engineName(snap)
         view.stateName = "引擎离线"
-        var parts = [Seg("上次模型 \(model)")]
-        if engine != nil { parts.append(Seg(" · \(engine!)")) }
-        view.stripRight = segJoin(parts)
+        // 引擎有问题时（app 写入 engine_note）状态条右侧改显示那句话
+        let note = snap["engine_note"]?.string ?? ""
+        if !note.isEmpty {
+            view.stripRight = [Seg(note, "warn")]
+        } else {
+            var parts = [Seg("上次模型 \(model)")]
+            if engine != nil { parts.append(Seg(" · \(engine!)")) }
+            view.stripRight = segJoin(parts)
+        }
         view.lanes.offline = true
         view.arc = "off"
         var todayJSON: JSON = [:]
         if let t = snap["today"], t.object != nil { todayJSON = t }
+        // 单价按模型填：同今日画面的规则
+        let priced = _num(todayJSON["priced_models"])
+        let unpriced = _num(todayJSON["unpriced_models"])
+        let none = (unpriced.number ?? 0) > 0 && (priced.number ?? 0) == 0
+        let costValue = none ? "—" : costFmt(_numD(todayJSON["cost"]), currency: config.currency)
+        let costFoot: String
+        if none {
+            costFoot = "未填单价"
+        } else if (unpriced.number ?? 0) > 0 {
+            costFoot = "不含 \(_pyStr(unpriced)) 个模型"
+        } else {
+            costFoot = ""
+        }
         let secs = Int(floor(_numD(snap["offline_s"])))
         let offCard: Card
         if secs < 60 {
@@ -339,8 +401,66 @@ public final class ViewModel {
         }
         view.bar = nil
         view.cards = [
-            Card("今日费用", costFmt(_numD(todayJSON["cost"]), currency: config.currency), "", ""),
+            Card("今日费用", costValue, "", costFoot),
             offCard,
+            memCard,
+        ]
+    }
+
+    /// 模型加载中（oMLX 按需加载）：已用时 + 按预计时间走的进度条，请求在后面排着。
+    private func loading(_ view: inout View, _ snap: JSON, _ memCard: Card) {
+        var ld: JSON = [:]
+        if let l = snap["loading"], l.object != nil { ld = l }
+        let el = _numD(ld["elapsed_s"])
+        let estJ = ld["estimated_s"]
+        let est: Double? = (estJ?.number).flatMap { $0 > 0 ? $0 : nil }
+
+        view.stateName = "模型加载中"
+        view.stripLeft = ""
+        // 显示名：loading 里的模型名，取不到就用快照的
+        let raw = ld["model"]?.string ?? ""
+        let name = raw.isEmpty ? modelName(snap) : displayName(raw)
+        let engine = engineName(snap)
+        view.stripRight = [Seg(engine != nil ? "\(name) · \(engine!)" : name)]
+
+        // 流指示点：照快照；三个数都是 0 时把排队设成 1（至少有个请求在等）
+        if view.lanes.decoding + view.lanes.prefilling + view.lanes.waiting == 0 {
+            view.lanes.waiting = 1
+        }
+
+        view.cap = "已用时"
+        view.unit = "秒"
+        view.bigWhole = true
+        if el < 10 {
+            let parts = split1(el)
+            view.bigInt = parts.0
+            view.bigDec = parts.1
+        } else {
+            view.bigInt = String(Int(floor(el)))
+            view.bigDec = ""
+        }
+        view.arc = "blank"
+        view.arcTarget = nil
+
+        if let est {
+            let estText = est < 10 ? String(format: "%.1f", est) : String(jsRound(est))
+            let rem = _ceilAtLeast1(est - el)
+            view.bar = Bar(kind: "prog", frac: min(0.99, el / est), level: "normal",
+                           text: segJoin([Seg("预计 "), Seg(estText, "strong"), Seg(" s · 剩余约 "),
+                                          Seg(String(rem), "strong"), Seg(" s")]))
+        } else {
+            view.bar = Bar(kind: "prog", frac: 0.0, level: "normal", text: [Seg("首次加载 · 没有预计时间")])
+        }
+
+        let sizeCard: Card
+        if let size = ld["size_gb"]?.number {
+            sizeCard = Card("模型大小", String(format: "%.1f", size), "GB", "")
+        } else {
+            sizeCard = Card("模型大小", "—", "", "", true)
+        }
+        view.cards = [
+            sizeCard,
+            Card("等待中", String(view.lanes.waiting), "个", "加载完开始"),
             memCard,
         ]
     }
@@ -597,23 +717,18 @@ public final class ViewModel {
         view.arc = "value"
         view.arcTarget = v2f((tps?.truthy ?? false) ? tps!.number ?? 0 : 0, "decode")
         view.bar = contextBar(snap, lastJSON["context_used"])
-        if !ttft.isNone {
-            view.stripRight = segJoin([Seg("首字 "), Seg(String(format: "%.2f", ttft!.number ?? 0), "strong"),
-                                       Seg(" s")])
-        } else {
-            view.stripRight = segJoin(memText)
-        }
+        // oMLX 没有推测解码的接受率：第三格改成首字，状态条就不再重复写首字
+        view.stripRight = segJoin(memText)
 
         let prompt = _numD(lastJSON["prompt_tokens"])
         let cached = _numD(lastJSON["cached_tokens"])
-        let accept = lastJSON["acceptance_rate"]
         view.cards = [
             Card("输出", tokFmt(_numD(lastJSON["completion_tokens"])), "tok",
                  "提示 \(tokFmt(prompt)) tok"),
             Card("缓存命中", String(pct(cached, prompt)), "%",
                  "\(tokFmt(cached)) tok"),
-            (accept?.truthy ?? false) ? Card("接受率", String(jsRound((accept!.number ?? 0) * 100)), "%", "")
-                : Card("接受率", "—", "", "", true),
+            !ttft.isNone ? Card("首字", String(format: "%.2f", ttft!.number ?? 0), "s", "")
+                : Card("首字", "—", "", "", true),
         ]
     }
 }
