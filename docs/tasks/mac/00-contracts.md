@@ -268,3 +268,40 @@ public struct ModelPrice: Equatable, Sendable, Codable {
 /// 时区的中文显示名：Asia/Shanghai → 北京时间，America/Los_Angeles → 太平洋时间，其他用系统给的中文名
 public func zoneDisplayName(_ identifier: String) -> String
 ```
+
+## 9. 第三批：绘制、轮询、设置、app
+
+第三批把 PanelCore 接成能运行的 app。设计见 `docs/design-mac.md` 的“整体架构”“设置”“打包、安装、登录时启动”几节，画面以原型 `docs/dashboard-prototype.html` 为准。本节和前面几节冲突时以本节为准。
+
+### 9.1 包和文件
+
+| 文件 | 内容 | 谁写 |
+| --- | --- | --- |
+| `mac/Package.swift` | 加库 `PanelRender`（依赖 PanelCore）、测试 `PanelRenderTests`；后面再加可执行目标 `TFPanel` | 编排者 |
+| `mac/Sources/PanelRender/Renderer.swift` | `panel/render.py` 的翻译：Core Graphics + Core Text | 任务 R1 |
+| `mac/Tests/PanelRenderTests/RenderTests.swift` | `panel/tests/test_render.py` 的翻译 | 任务 R1 |
+| `mac/Sources/PanelCore/Memory.swift` | 读整机内存 | 任务 A1 |
+| `mac/Sources/PanelCore/Poller.swift` | 轮询：读引擎、读内存、喂采集器、算间隔 | 任务 A1 |
+| `mac/Sources/PanelCore/AppSettings.swift` | 设置（UserDefaults）→ `Config` | 任务 A1 |
+| `mac/Sources/TFPanel/` | app：找副屏、窗口、菜单栏、设置窗口、登录项 | 任务 A2 |
+
+`PanelCore` 仍然只能 `import Foundation`。`PanelRender` 可以 `import Foundation`、`AppKit`、`CoreText`、`ImageIO`、`UniformTypeIdentifiers` 和 `PanelCore`。
+
+### 9.2 绘制（R1，`Renderer.swift`）
+
+```swift
+public final class Renderer {
+    public init()
+    /// 画一帧。ctx 的坐标是左上角原点、y 向下，单位是像素；width、height 是要画满的区域。
+    /// 画完后 ctx 的变换矩阵、文字矩阵和画之前一样。
+    public func draw(_ ctx: CGContext, view: View, frame: Frame, width: Double = 960, height: Double = 640)
+    /// 新建一张左上角原点、y 向下的位图：sRGB，每像素 4 字节 R、G、B、A（premultipliedLast），bytesPerRow = width * 4
+    public static func makeContext(width: Int, height: Int) -> CGContext?
+    /// 画到新位图上，frame 为 nil 时用 Animator.settled(view)
+    public func makeImage(view: View, frame: Frame? = nil, width: Int = 960, height: Int = 640) -> CGImage?
+    /// 写成 PNG（960×640），成功返回 true
+    public func renderPNG(view: View, path: String, frame: Frame? = nil) -> Bool
+}
+```
+
+`Renderer` 只在一个线程上用（app 里是主线程）。

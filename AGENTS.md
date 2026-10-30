@@ -33,7 +33,7 @@
 
 ## 目录
 
-- `mac/` Mac 版（Swift 包）：`Sources/PanelCore/` 纯逻辑，`Tests/PanelCoreTests/` 测试
+- `mac/` Mac 版（Swift 包）：`Sources/PanelCore/` 纯逻辑，`Sources/PanelRender/` 绘制，`Sources/TFPanel/` app，`Tests/PanelCoreTests/`、`Tests/PanelRenderTests/` 测试
 - `panel/` Spark 版的 Python 实现，翻译时的参照（只读）
 - `panel/tests/` Spark 版的测试，翻译时的参照（只读）
 - `fixtures/` 各状态的指标快照样例（只读）
@@ -42,7 +42,7 @@
 
 ## 技术约束
 
-- Swift 6，最低 macOS 14。`PanelCore` 只能 `import Foundation`。
+- Swift 6，最低 macOS 14。`PanelCore` 只能 `import Foundation`；`PanelRender`、`TFPanel` 能用哪些系统框架见接口约定第 9 节。
 - 测试只用 swift-testing（`import Testing`、`@Test`、`#expect`）。这台机器上没有 XCTest，不要用它。
 - 不安装任何依赖，不加 Swift 包依赖：`pip`、`brew`、`npm`、SwiftPM 的远程包都不行。
 - 不要改 `mac/Package.swift`。
