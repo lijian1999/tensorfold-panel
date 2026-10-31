@@ -19,6 +19,7 @@ import Testing
         #expect(s.keyMode == .auto)
         #expect(s.manualKey == "")
         #expect(s.zone == .system)
+        #expect(s.currency == "$")
         #expect(s.prices.isEmpty)
         #expect(s.knownModels.isEmpty)
         #expect(s.screenName == "TYPE-C")
@@ -26,6 +27,7 @@ import Testing
         #expect(s.launchAtLogin == false)
         let c = s.config(systemZone: "Asia/Shanghai")
         #expect(c.timezone == "Asia/Shanghai")
+        #expect(c.currency == "$")
         #expect(c.prices.isEmpty)
         #expect(c.roundGapS == 60)
         #expect(c.animFps == 10)
@@ -41,6 +43,7 @@ import Testing
         s.keyMode = .manual
         s.manualKey = "k9"
         s.zone = .beijing
+        s.currency = "¥"
         s.prices = ["A": ModelPrice(input: 0.15, cached: 0.016, output: 0.47)]
         s.knownModels = ["A", "B"]
         s.screenName = "HDMI"
@@ -52,6 +55,7 @@ import Testing
         #expect(t.keyMode == .manual)
         #expect(t.manualKey == "k9")
         #expect(t.zone == .beijing)
+        #expect(t.currency == "¥")
         #expect(t.prices == ["A": ModelPrice(input: 0.15, cached: 0.016, output: 0.47)])
         #expect(t.knownModels == ["A", "B"])
         #expect(t.screenName == "HDMI")
@@ -69,6 +73,21 @@ import Testing
         #expect(s.screenName == "TYPE-C")
         s.address = " 10.0.0.2:8000 "
         #expect(s.address == "10.0.0.2:8000")
+    }
+
+    @Test func test_货币() {
+        let (name, d) = makeDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        let s = AppSettings(defaults: d)
+        s.currency = "¥"
+        #expect(AppSettings(defaults: d).currency == "¥")
+        #expect(AppSettings(defaults: d).config().currency == "¥")
+        s.currency = ""
+        #expect(s.currency == "$")   // 空白当默认
+        s.currency = " ¥ "
+        #expect(s.currency == "¥")   // 去掉首尾空白
+        s.currency = "€"
+        #expect(s.currency == "€")   // 别的值原样保留，画面上原样显示
     }
 
     @Test func test_认不出的选项用默认() {

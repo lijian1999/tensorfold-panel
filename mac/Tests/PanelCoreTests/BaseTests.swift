@@ -37,6 +37,15 @@ import Testing
     }
 }
 
+@Suite struct TestCurrencyName {
+    @Test func test_values() {
+        #expect(currencyName("$") == "美元")
+        #expect(currencyName("¥") == "人民币")
+        #expect(currencyName("€") == "€")
+        #expect(currencyName("") == "")
+    }
+}
+
 @Suite struct TestDurFmt {
     @Test func test_values() {
         let cases: [(Double, String)] = [

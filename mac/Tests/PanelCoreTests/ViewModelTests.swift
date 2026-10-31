@@ -130,6 +130,40 @@ private func checkFixture(_ name: String, _ now: Double = 100.0, _ overrides: [S
     }
 }
 
+/// 货币：换货币只换符号和文字，数字不变（2026-10-31 加人民币支持）。
+@Suite struct TestCurrency {
+    private func viewWithCurrency(_ currency: String, _ name: String = "idle") -> View {
+        var c = Config()
+        c.currency = currency
+        return ViewModel(config: c).update(read(name), now: 100.0)
+    }
+
+    @Test func test_人民币() {
+        let view = viewWithCurrency("¥")
+        #expect(view.cap == "今日费用")
+        #expect(view.unit == "人民币")
+        #expect(view.bigInt == "¥0")
+        #expect(view.bigDec == ".60")
+    }
+
+    @Test func test_别的货币原样显示() {
+        let view = viewWithCurrency("€")
+        #expect(view.unit == "€")
+        #expect(view.bigInt == "€0")
+        #expect(view.bigDec == ".60")
+    }
+
+    @Test func test_离线的人民币费用() {
+        let view = viewWithCurrency("¥", "offline")
+        #expect(cards(view).first == CardRow("今日费用", "¥0.60", "", ""))
+    }
+
+    @Test func test_离线的其他货币费用() {
+        let view = viewWithCurrency("€", "offline")
+        #expect(cards(view).first == CardRow("今日费用", "€0.60", "", ""))
+    }
+}
+
 @Suite struct TestPrefill {
     @Test func test_prefill() {
         let view = checkFixture("prefill")

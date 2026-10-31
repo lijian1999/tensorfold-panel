@@ -317,7 +317,7 @@ public final class ViewModel {
 
         let currency = config.currency
         view.cap = "今日费用"
-        view.unit = currency == "$" ? "美元" : currency
+        view.unit = currencyName(currency)
         if none {
             view.bigInt = "—"
             view.bigDec = ""

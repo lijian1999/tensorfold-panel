@@ -29,6 +29,13 @@ public func costFmt(_ c: Double, currency: String = "$") -> String {
     return currency + String(format: "%.2f", c)
 }
 
+/// 货币的单位名：`$` 写“美元”、`¥` 写“人民币”，别的值原样显示。
+public func currencyName(_ currency: String) -> String {
+    if currency == "$" { return "美元" }
+    if currency == "¥" { return "人民币" }
+    return currency
+}
+
 /// 时长：秒 / 分钟 / 小时，向下取整。
 public func durFmt(_ sec: Double) -> String {
     let x = max(0, Int(sec.rounded(.down)))

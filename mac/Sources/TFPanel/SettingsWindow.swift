@@ -30,6 +30,7 @@ final class SettingsModel: ObservableObject {
     @Published var statusNote = "未连接"       // controller.issue.message ?? "已连接"
     // 费用页
     @Published var rows: [PriceRowVM] = []
+    @Published var currencyText = "$"          // 当前货币符号：$ / ¥
     // 副屏页
     @Published var screenNameText = ""
     // 当前页
@@ -43,6 +44,7 @@ final class SettingsModel: ObservableObject {
         manualKeyText = s.manualKey
         screenNameText = s.screenName
         statusNote = controller.issue.message ?? "已连接"
+        currencyText = s.currency
         rebuildRows(keeping: [])
     }
 
@@ -53,6 +55,7 @@ final class SettingsModel: ObservableObject {
         keyMode = s.keyMode
         manualKeyText = s.manualKey
         screenNameText = s.screenName
+        currencyText = s.currency
         statusNote = controller.issue.message ?? "已连接"
         rebuildRows(keeping: rows)
     }
@@ -102,6 +105,18 @@ final class SettingsModel: ObservableObject {
         keyMode = mode
         controller.settings.keyMode = mode
         controller.settingsChanged()
+    }
+
+    /// 换货币：只换符号和文字，数字不按汇率换算；立刻生效
+    func applyCurrency(_ symbol: String) {
+        currencyText = symbol
+        controller.settings.currency = symbol
+        controller.settingsChanged()
+    }
+
+    /// 费用页的说明文字，跟着货币走
+    var currencyNote: String {
+        currencyName(currencyText) + " / 百万 token。自己查了 API 价格填；没填的模型不算进今日费用"
     }
 
     func forget(_ model: String) {
@@ -281,7 +296,19 @@ private struct SettingsRootView: SwiftUI.View {
 
     private var pricePage: some SwiftUI.View {
         VStack(alignment: .leading, spacing: 8) {
-            note("美元 / 百万 token。自己查了 API 价格填；没填的模型不算进今日费用")
+            formRow("货币") {
+                Picker("", selection: $model.currencyText) {
+                    Text("美元").tag("$")
+                    Text("人民币").tag("¥")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 160)
+                .onChange(of: model.currencyText) { _, symbol in
+                    model.applyCurrency(symbol)
+                }
+            }
+            note(model.currencyNote)
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
                 GridRow {
                     Text("模型").font(.callout).foregroundColor(.secondary)

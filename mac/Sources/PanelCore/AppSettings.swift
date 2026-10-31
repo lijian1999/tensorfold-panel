@@ -59,6 +59,12 @@ public final class AppSettings {
         set { defaults.set(newValue.rawValue, forKey: "timezone_choice") }
     }
 
+    /// 货币符号：单价按它填（`$` 默认，或 `¥`）；换货币只换符号和文字，数字不按汇率换算
+    public var currency: String {
+        get { trimmedString("currency", "$") }
+        set { defaults.set(newValue, forKey: "currency") }
+    }
+
     public var prices: [String: ModelPrice] {
         get {
             guard let data = defaults.data(forKey: "prices"),
@@ -107,6 +113,7 @@ public final class AppSettings {
         var c = Config()
         c.timezone = zoneIdentifier(systemZone: systemZone)
         c.prices = prices
+        c.currency = currency
         c.modelName = "未加载模型"
         // 这几个键只能在终端上用 defaults write 改
         if let v = positiveNumber("round_gap_s") { c.roundGapS = v }
