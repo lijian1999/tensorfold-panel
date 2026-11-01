@@ -11,6 +11,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     private var screenRow: NSMenuItem!
     private var noteRow: NSMenuItem!
+    private var shotRow: NSMenuItem!
     private var engineRow: NSMenuItem!
     private var zoneSubmenu: NSMenu!
     private var priceRow: NSMenuItem!
@@ -43,6 +44,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         noteRow.isEnabled = false
         noteRow.isHidden = true
         menu.addItem(noteRow)
+
+        shotRow = NSMenuItem(title: "副屏截图（调试）", action: #selector(captureScreenshot), keyEquivalent: "")
+        shotRow.target = self
+        menu.addItem(shotRow)
 
         engineRow = NSMenuItem(title: "引擎", action: nil, keyEquivalent: "")
         engineRow.isEnabled = false
@@ -107,6 +112,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             noteRow.isHidden = true
         }
         engineRow.title = engineMenuText(issue: controller.issue, address: s.address)
+        // 副屏没接上时「副屏截图」置灰
+        shotRow.isEnabled = controller.screens.isSecondaryConnected
 
         // 时区子菜单：三项，顺序同 ZoneChoice.allCases，当前的打勾
         zoneSubmenu.removeAllItems()
@@ -138,6 +145,11 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func openEnginePage() {
         settingsWindow.show(page: .engine)
+    }
+
+    /// 菜单栏「副屏截图」：截副屏真实显示，存盘后在 Finder 里定位（结果写日志）。
+    @objc private func captureScreenshot() {
+        controller.screens.captureScreenshot()
     }
 
     @objc private func toggleAutoSwitch() {

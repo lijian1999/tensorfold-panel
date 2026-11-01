@@ -457,6 +457,7 @@
         <li><b>费用单价（新）</b>：每个模型一组，自己查了 API 价格在菜单栏的“费用单价…”里填，不带默认值。有的模型没填：主数字只算填了的，日期那行写“不含 n 个模型”；一个都没填：主数字是“—”，日期那行写“未填单价 · 在菜单栏里填”。</li>
         <li><b>货币（新）</b>：费用页顶上选美元（默认）或人民币。单价按所选货币填；换货币只换符号和文字，数字不按汇率换算，已填的单价和历史都不动。空闲画面的标题写“今日费用 · 美元 / 人民币”，数字带 $ / ¥。</li>
         <li><b>引擎</b>：在设置里选，这一版只有 oMLX。空闲和离线时模型名后面标出引擎名。预填充速度和进度是 oMLX 实报的。</li>
+        <li><b>副屏截图（调试，新）</b>：菜单栏新增一项，把副屏真实显示的内容截成 PNG（真实像素，不是重画）存到 <code>~/Library/Logs/TFPanel/</code> 并在 Finder 里定位，用于排查“画面数据对、屏幕显示不对”的问题；副屏未接时置灰。截屏用的是已弃用的 CG 老接口，实测 macOS 26 上不需要“屏幕录制”权限。</li>
         <li><b>数字</b>：速度、内存这些还是 Spark 版的实测值，Mac Studio 到了用实测值替换。</li>
         <li><b>没有模拟的</b>：空闲 30 分钟后画面调暗到 40%。</li>
       </ul>
@@ -479,6 +480,7 @@
       <div class="mac-row">
         <div class="mac-menu" role="menu" aria-label="菜单栏菜单示意">
           <div class="mi dim">副屏：TYPE-C · 960 × 640</div>
+          <div class="mi" title="调试：把副屏此刻真实显示的内容截成 PNG，存到 ~/Library/Logs/TFPanel/ 并在 Finder 里定位；副屏未接时置灰">副屏截图（调试）</div>
           <div class="mi dim" id="menuEngine">引擎：oMLX · 127.0.0.1:8000</div>
           <div class="sep"></div>
           <div class="mi has-sub">时区<span class="chev">›</span>

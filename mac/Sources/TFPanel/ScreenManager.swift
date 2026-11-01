@@ -1,7 +1,10 @@
 // 副屏与窗口管理：按名字找副屏 → 建窗口铺满；副屏消失 → 关窗口；屏幕参数变化 → 重新铺满。
 // 窗口属性照第 1 版（git 6c9ad9a）：无边框、不抢焦点、不吃点击、盖住副屏菜单栏。
 import AppKit
+import CoreGraphics
+import ImageIO
 import PanelCore
+import UniformTypeIdentifiers
 
 /// 无边框全屏窗口：不抢焦点、不接收点击。
 final class PanelWindow: NSWindow {
@@ -50,6 +53,9 @@ final class ScreenManager {
         return "未找到 \(screenName)"
     }
 
+    /// 副屏是否已连接（菜单栏「副屏截图」能不能点）。
+    var isSecondaryConnected: Bool { secondaryScreen != nil }
+
     func start() {
         rescan()
         observer = NotificationCenter.default.addObserver(
@@ -84,6 +90,41 @@ final class ScreenManager {
     func applyAutoSwitch() {
         guard let screen = secondaryScreen, !noModeSwitch else { return }
         applyMode(to: screen)
+    }
+
+    /// 菜单栏「副屏截图」：把副屏此刻真实显示的内容截成 PNG（真实像素，不是重画），
+    /// 存到 ~/Library/Logs/TFPanel/（文件名带日期时间），存好后在 Finder 里定位，并写一行日志。
+    /// 截屏用的是系统已标记弃用的 CG 老接口，实测 macOS 26 上不需要「屏幕录制」权限；
+    /// 失败只写日志，不影响主功能。
+    func captureScreenshot() {
+        guard let screen = secondaryScreen,
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            Log.write("副屏截图失败：拿不到副屏")
+            return
+        }
+        guard let image = CGDisplayCreateImage(displayID) else {
+            Log.write("副屏截图失败：系统没有返回画面（截屏可能已被系统限制）")
+            return
+        }
+        let dir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/TFPanel")
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
+        let path = (dir as NSString).appendingPathComponent("截图-\(formatter.string(from: Date())).png")
+        guard let dest = CGImageDestinationCreateWithURL(
+            URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil
+        ) else {
+            Log.write("副屏截图失败：无法创建 PNG 写入器")
+            return
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            Log.write("副屏截图失败：\(path)")
+            return
+        }
+        Log.write("副屏截图已保存：\(path)")
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
     /// 在主屏上开一个普通的带标题栏预览窗口（给命令行 --window 用）。
