@@ -2,23 +2,34 @@
 
 ## 进行中（2026-11-01）：分支 `mac-60fps`，方案②：60fps 静态/动态分层渲染
 
-目标：持续动画帧率默认 10 → 60，但不增加 CPU/解码拖慢。用户已确认方案②并授权自行决策；设计文档、接口约定已改好（见下），**代码还没动**。
+目标：持续动画帧率默认 10 → 60，但不增加 CPU/解码拖慢。用户已确认方案②并授权自行决策。**代码已实现并验收（T1、T2 派工完成 + 编排者实机修正），待提交**。
 
-### 已完成（已在 `mac-60fps` 分支提交）
+### 已完成（本次，未提交）
 
-- `docs/design-mac.md` 三处：整体架构 App 条目补两层画法；“defaults write”清单里动画帧率（10）→（60，可设 1–60）；已定事项加一条（2026-11-01，含“预期稳定解码 CPU 与 10 帧持平，约 5% 单核，实现后实测核对”）。
-- `docs/tasks/mac/00-contracts.md`：Config 行加例外说明——`animFps` mac 版默认 60（可设 1–60），Python 版仍是 10。
-- 原型不用改：动画本来就是 requestAnimationFrame（原生约 60fps），原型已经是 60fps 的效果。
-- 实测依据：稳定解码 2 倍屏 10fps 全帧画 = 5.5% 单核（提交 b8d2054）；临时基准测纯光栅 0.634 ms/帧（临时文件已删）。稳定解码时每帧真变的只有：流指示点脉冲、数值弧、进度条、主数字（文字本身节流 4Hz）。
+- `Renderer.swift`：`draw` 拆成 `drawStatic` + `drawDynamic`，`draw()` 本身变成两趟连画；既有 15 个绘制测试全过。歧义处理：静态趟的不透明度取 `Animator.settled(view)`（view 派生常量），同时满足“静态趟与 frame 无关（可缓存）”和“空闲不画刻度”。
+- `PanelView.swift`：单层改双层（容器层 + 静态层 + 动态层，各带 delegate）；step 只在拍头调一次、两层共用帧；稳定帧（`Frame.isSettled`，各 α 与 dim ≥ 0.999）静态层只按需重画、动态层每拍重画且脏区收窄成三个矩形（状态条点、仪表环带、主数字+条块）；非稳定帧两层整帧。`frameIntervalMs` 钳制 1–30 → 1–60（下限 16ms；淡入仍 33ms）。
+- `Helpers.swift`（PanelRender）：`Frame.isSettled`、`frameIntervalMs(fps:fadingIn:)` 纯函数。帧率换算用向下取整（round 会让 60fps 得 17ms，达不到 16），T2 执行者发现并改对。
+- `Config.swift`：`animFps` 默认 60.0（可设 1–60）。
+- 测试：新增 `RenderSplitTests`（4 个：全部样例两趟=整帧容差 0、静态趟与 frame 无关、动态趟跟 frame 变、极端输入不崩）+ `LayerSplitTests`（5 个：稳定帧两趟=整帧、稳定判定逐字段、帧率钳制含 60→16）。PanelCore 275 + PanelRender 24 全过。
+- **实机修正（编排者直接改）**：首次实机 CPU 100%，`sample` 定位到无界递归——无画面分支里两层 `setNeedsDisplay` 会同步触发图层重画，图层里又走一拍，主线程被卡死、快照永远进不来。修复：无画面分支不标脏，静态层置脏标志等下次有画面时重画；`drawLayer` 的“兑底走一拍”删除。
 
-### 待做：代码实现计划
+### 实测 CPU（这台 MBP，副屏 960×640 1 倍）
 
-1. `mac/Sources/PanelRender/Renderer.swift`：把 `draw` 拆成 `drawStatic` + `drawDynamic`。静态 = 背景、状态条文字、底环和缺口、离线文字/标题行、刻度数字、右侧三栏；动态 = 流指示点、灰点、数值弧、主数字、进度条整块、调暗遮罩。`draw()` 本身重构成先静态后动态的同一批元素函数，行为不变（RenderTests 逐像素断言会抓回归）。正确性条件：各路不透明度和 dim 全为 1（稳定画面）时，两趟先后画与 `draw()` 逐像素一致；组不透明度 <1（淡入中）时 _block 的透明图层语义会改变合成顺序，所以淡入期间必须整帧画。注意交叉叠序已逐一核实：圆点与状态条文字、弧与刻度数字/标题、弧与卡片互不重叠；弧→主数字的先后关系保持。
-2. `mac/Sources/TFPanel/PanelView.swift`：单层改双层（容器层下加静态层 + 动态层，各带 delegate）。每拍只 step 一次动画（帧存起来给两层共用，不能各画各的 step）。稳定帧（各 α 与 dim ≥0.999）时静态层 drawStatic、动态层 drawDynamic，重画定时器只驱动动态层；非稳定帧静态层画整帧 draw()、动态层清空。静态层重画时机：换画面数据、缩放变、模式切换。`frameIntervalMs` 钳制 1–30 → 1–60（下限 33ms → 16ms；淡入仍固定 33ms）。
-3. `mac/Sources/PanelCore/Config.swift`：`animFps` 默认 10.0 → 60.0（AppSettings 读同名键，无需改）。
-4. 测试：新增套件（RenderTests 风格）——(a) 每个稳定样例：drawStatic+drawDynamic 与 draw() 逐像素一致（容差 0–1）；(b) 同一 view、两个不同 frame 的 drawStatic 输出逐像素一致（证明静态层可缓存）；(c) 已有测试全不动。若有断言 Config 默认 10 的测试一并改 60。
-5. 完成检查：`cd mac && swift build && swift test`；再用临时基准测 drawStatic / drawDynamic+清屏耗时，推算 60fps CPU 写进交接文件；真机实测（活动监视器 + 实解码）留给用户/Studio。
-6. 实测 CPU 的办法：`mac/dist/TFPanel.app/Contents/MacOS/TFPanel --no-mode-switch` 跑真实解码，活动监视器看 TFPanel CPU；超标就把 `anim_fps` 降（defaults 域 `com.tensorfold.panel`）或把动态层范围收窄，再不行退 30fps。
+- 基准（测试环境，纯绘制）：静态 0.473 ms/帧，动态+清屏 0.104 ms/帧，整帧 0.566 ms/帧。
+- 实机（app 连真实 oMLX）：空闲 0.3–0.5%；稳定解码段（我的对话即负载，间歇流式）9–18%（60fps）、6–10%（30fps 对照）。**交接预设的“约 5% 单核”没达到**：动态层计算本身只 0.6%/60fps，大头在 CA 每帧回填/合成链路。已收窄脏区（约 36% 整屏），再往下降需要换思路（比如动态层只用离屏小图层拼合）。
+- 应急选项已可用：`defaults write com.tensorfold.panel anim_fps -float 30` 立刻减半；设 10 则回到旧帧率。
+- Studio 真机验收（活动监视器 + 实解码）留给用户/Studio，同样建议先看 60fps 解码 CPU 再决定是否降。
+
+### 派工环境修复（本次踩到的两个坑，已修）
+
+- pi-web 会话里 subagent 扩展的 `getPiInvocation` 把 pi-web 自己的脚本当 pi CLI 重用，子代理进程拿到 pi-web 的参数报错。已修 `~/.pi/agent/extensions/subagent/index.ts`：重用前检测脚本路径是否真是 pi 的 CLI 入口，否则回落到 `pi` 命令。
+- `run_pi.sh` 里裸 `$T` 后跟中文逗号时，macOS 26 的 bash 3.2 会把变量展开弄丢（多字节字符紧随其后的已知回归），执行者拿到“再读 ??”的损坏提示词：一次退出、一次猜错任务白做一轮（工作区已回滚）。已改 `${T}`。提醒：这台机器上给 bash 传含多字节字符的模板字符串，变量后要么加花括号、要么后跟 ASCII。
+
+### 待做
+
+1. 提交这批（见下）。
+2. Studio 真机验收：60fps 稳定解码 CPU（活动监视器）；超标就降 `anim_fps` 或再收窄动态层。
+3. （可选，另开一批）把动态层进一步缩成离屏小图层，把 60fps 解码 CPU 压回 5% 附近——先有真机数据再决定要不要做。
 
 ## 完工报告（2026-10-30）
 

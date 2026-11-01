@@ -116,7 +116,7 @@ import Testing
         #expect(c.prefillShortS == 3.0)
         #expect(c.doneHoldS == 4.0)
         #expect(c.dimAfterS == 1800.0)
-        #expect(c.animFps == 10.0)
+        #expect(c.animFps == 60.0)
         #expect(c.timezone == "America/Los_Angeles")
         #expect(c.currency == "$")
         #expect(c.stateDir == "~/Library/Application Support/TFPanel")

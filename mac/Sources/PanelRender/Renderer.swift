@@ -224,18 +224,17 @@ public final class Renderer {
         }
     }
 
-    /// 状态条：流指示点、排队数、状态名、模型名、右侧文字。
-    private func _strip(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+    /// 状态条静态部分：排队数、状态名、模型名、右侧文字（流指示点在动态趟）。
+    /// 起点横坐标 x 的“点的右边缘”在这里单独算，与动态趟画点互不依赖。
+    private func _stripStatic(_ ctx: CGContext, _ view: View) {
         let lanes = view.lanes
         var x = 14.0
         if lanes.offline {
-            // 离线：只有一个红点，直径 8
-            _circle(ctx, 18, STRIP_Y, 4, DANGER)
+            // 离线：红点在动态趟画，这里只让出它的位置
             x = 22 + 8
         } else {
             let n = max(0, min(12, lanes.max))
             let right = n != 0 ? 14 + 11 * Double(n) - 4 : 14.0   // 最后一个点的右边缘
-            if n != 0 { _dots(ctx, lanes, n, frame) }
             if lanes.waiting > 0 {
                 let text = "+\(lanes.waiting)"
                 let w = _width(ctx, text, 12, true)
@@ -265,6 +264,17 @@ public final class Renderer {
         }
     }
 
+    /// 状态条动态部分：流指示点（含离线时那个红点）。
+    private func _stripDynamic(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+        let lanes = view.lanes
+        if lanes.offline {
+            _circle(ctx, 18, STRIP_Y, 4, DANGER)
+        } else {
+            let n = max(0, min(12, lanes.max))
+            if n != 0 { _dots(ctx, lanes, n, frame) }
+        }
+    }
+
     /// 放不下 maxW 时从末尾删字、加“…”；一个字也放不下就返回空串。
     private func _fit(_ text: String, _ size: Double, _ maxW: Double) -> String {
         if _width(nil, text, size, false) <= maxW { return text }
@@ -280,20 +290,19 @@ public final class Renderer {
 
     // ------------------------------------------------------------ 仪表
 
-    /// 仪表：底环、刻度缺口、灰色小点、数值弧、刻度数字。
-    ///
-    /// 圆弧位置 f 对应的角度 = 135° + 270°×f（y 轴向下，角度增大是顺时针）。
-    private func _dial(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+    /// 仪表静态部分：底环、刻度缺口。不透明度取 settled 帧（由 view 决定，与传入 frame 无关）。
+    private func _dialStatic(_ ctx: CGContext, _ view: View) {
+        let sf = Animator.settled(view)
         let (cx, cy, r) = DIAL
-        if frame.trackAlpha > 0 {
+        if sf.trackAlpha > 0 {
             ctx.setLineWidth(14)
             ctx.setLineCap(.round)
             ctx.addArc(center: CGPoint(x: cx, y: cy), radius: r,
                        startAngle: rad(135), endAngle: rad(405), clockwise: false)
-            ctx.setStrokeColor(withAlpha(TRACK, clamp01(frame.trackAlpha)))
+            ctx.setStrokeColor(withAlpha(TRACK, clamp01(sf.trackAlpha)))
             ctx.strokePath()
         }
-        if frame.notchAlpha > 0 {
+        if sf.notchAlpha > 0 {
             // 刻度缺口：用底色在底环上画四道缺口（半透明时不能直接擦出洞）
             ctx.setLineWidth(2.5)
             ctx.setLineCap(.butt)
@@ -304,9 +313,14 @@ public final class Renderer {
                 ctx.move(to: CGPoint(x: cx + (r - 8) * ca, y: cy + (r - 8) * sa))
                 ctx.addLine(to: CGPoint(x: cx + (r + 8) * ca, y: cy + (r + 8) * sa))
             }
-            ctx.setStrokeColor(withAlpha(BG, clamp01(frame.notchAlpha)))
+            ctx.setStrokeColor(withAlpha(BG, clamp01(sf.notchAlpha)))
             ctx.strokePath()
         }
+    }
+
+    /// 仪表动态部分：灰色小点（ghost）、数值弧。主数字在它之后画，压在弧上。
+    private func _dialDynamic(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+        let (cx, cy, r) = DIAL
         if let ghost = view.ghost, frame.ghostAlpha > 0 {
             let a = (135 + 270 * clamp01(ghost)) * .pi / 180
             _circle(ctx, cx + r * cos(a), cy + r * sin(a), 7, GHOST, frame.ghostAlpha)
@@ -314,32 +328,33 @@ public final class Renderer {
         if frame.valueAlpha > 0 {
             ctx.setLineWidth(14)
             ctx.setLineCap(.round)
-            if frame.arcFrac <= 0 {
-                // 弧长为零：画成起点处的一个圆点
-                let a: Double = 135 * .pi / 180
-                _circle(ctx, cx + r * cos(a), cy + r * sin(a), 7,
-                        mix(ACCENT, AMBER, clamp01(frame.arcMix)), clamp01(frame.valueAlpha))
-            } else {
-                let a0: Double = 135 * .pi / 180
-                ctx.addArc(center: CGPoint(x: cx, y: cy), radius: r,
-                           startAngle: CGFloat(a0),
-                           endAngle: CGFloat(a0 + 270 * clamp01(frame.arcFrac) * .pi / 180),
-                           clockwise: false)
-                // 数值弧的颜色：薄荷绿 → 琥珀色按 mix 混合
-                ctx.setStrokeColor(withAlpha(mix(ACCENT, AMBER, clamp01(frame.arcMix)), clamp01(frame.valueAlpha)))
-                ctx.strokePath()
-            }
+        if frame.arcFrac <= 0 {
+            // 弧长为零：画成起点处的一个圆点
+            let a: Double = 135 * .pi / 180
+            _circle(ctx, cx + r * cos(a), cy + r * sin(a), 7,
+                    mix(ACCENT, AMBER, clamp01(frame.arcMix)), clamp01(frame.valueAlpha))
+        } else {
+            let a0: Double = 135 * .pi / 180
+            ctx.addArc(center: CGPoint(x: cx, y: cy), radius: r,
+                       startAngle: CGFloat(a0),
+                       endAngle: CGFloat(a0 + 270 * clamp01(frame.arcFrac) * .pi / 180),
+                       clockwise: false)
+            // 数值弧的颜色：薄荷绿 → 琥珀色按 mix 混合
+            ctx.setStrokeColor(withAlpha(mix(ACCENT, AMBER, clamp01(frame.arcMix)), clamp01(frame.valueAlpha)))
+            ctx.strokePath()
+        }
         }
         ctx.setLineCap(.butt)
     }
 
-    /// 刻度数字：六个，位置见任务说明。
-    private func _ticks(_ ctx: CGContext, _ view: View, _ frame: Frame) {
-        if frame.ticksAlpha <= 0 { return }
+    /// 刻度数字：六个，位置见任务说明。静态，不透明度取 settled 帧（由 view 决定）。
+    private func _ticks(_ ctx: CGContext, _ view: View) {
+        let a = Animator.settled(view).ticksAlpha
+        if a <= 0 { return }
         // 几个刻度数字互不重叠，直接乘不透明度，不开整屏大小的透明图层（解码时每帧都要画，图层很费 CPU）
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        ctx.setAlpha(CGFloat(min(1, frame.ticksAlpha)))
+        ctx.setAlpha(CGFloat(min(1, a)))
         let labels = (scales[view.scale] ?? scales["decode"]!).labels
         let (cx, cy, r) = DIAL
         for (f, label) in zip(tickFracs, labels) {
@@ -448,14 +463,19 @@ public final class Renderer {
         }
     }
 
-    /// 仪表盘中间那块。
-    private func _center(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+    /// 中间块静态部分：离线画面那两行文字；在线时只有标题行。
+    private func _centerStatic(_ ctx: CGContext, _ view: View) {
         if view.state == "offline" {
             _text(ctx, "引擎离线", 28, 166, 166, TEXT_2, true, align: "center")
             _text(ctx, "等待引擎响应…", 13, 166, 199, MUTED, false, align: "center")
             return
         }
         if !view.cap.isEmpty || !view.unit.isEmpty { _capLine(ctx, view) }
+    }
+
+    /// 中间块动态部分：主数字、进度条整块。
+    private func _centerDynamic(_ ctx: CGContext, _ view: View, _ frame: Frame) {
+        if view.state == "offline" { return }
         if !frame.bigInt.isEmpty || !frame.bigDec.isEmpty { _big(ctx, view, frame) }
         if view.bar != nil { _bar(ctx, view, frame) }
     }
@@ -506,18 +526,41 @@ public final class Renderer {
 
     // ------------------------------------------------------------ 入口
 
-    /// 画一帧。开头 saveGState + scaleBy，结尾 restoreGState，并设回文字矩阵。
+    /// 画一帧：静态一趟紧接动态一趟。稳定帧（各 α 与 dim 全为 1）下与逐元素整帧画一致。
     public func draw(_ ctx: CGContext, view: View, frame: Frame, width: Double = 960, height: Double = 640) {
-        let tm0 = ctx.textMatrix                       // save/restore 不保存文字矩阵，自己还原
+        drawStatic(ctx, view: view, frame: frame, width: width, height: height)
+        drawDynamic(ctx, view: view, frame: frame, width: width, height: height)
+    }
+}
+
+public extension Renderer {
+    /// 画静态一趟：背景 + 稳定画面里每帧不变的元素（状态条文字、底环、刻度、
+    /// 标题行、右侧卡片、离线文字）。内容只由 view 决定（不透明度取 settled 帧），
+    /// 可按 view 缓存。各 α 与 dim 全为 1 时，与 draw() 逐像素一致。
+    func drawStatic(_ ctx: CGContext, view: View, frame: Frame, width: Double = 960, height: Double = 640) {
+        let tm0 = ctx.textMatrix                   // save/restore 不保存文字矩阵，自己还原
         ctx.saveGState()
         ctx.scaleBy(x: CGFloat(width / 480), y: CGFloat(height / 320))
         ctx.setFillColor(BG)
         ctx.fill(CGRect(x: 0, y: 0, width: 480, height: 320))
-        _block(ctx, frame.stripAlpha) { self._strip(ctx, view, frame) }
-        _dial(ctx, view, frame)
-        _ticks(ctx, view, frame)
-        _block(ctx, frame.centerAlpha) { self._center(ctx, view, frame) }
-        _block(ctx, frame.statsAlpha) { self._cards(ctx, view, frame) }
+        _stripStatic(ctx, view)
+        _dialStatic(ctx, view)
+        _ticks(ctx, view)
+        _centerStatic(ctx, view)
+        _cards(ctx, view, frame)
+        ctx.restoreGState()
+        ctx.textMatrix = tm0
+    }
+
+    /// 画动态一趟：每帧可能变的元素（流指示点、ghost、数值弧、主数字、
+    /// 进度条整块、调暗遮罩）。ctx 此时已经画过静态；先画弧再画主数字，保持压叠序。
+    func drawDynamic(_ ctx: CGContext, view: View, frame: Frame, width: Double = 960, height: Double = 640) {
+        let tm0 = ctx.textMatrix
+        ctx.saveGState()
+        ctx.scaleBy(x: CGFloat(width / 480), y: CGFloat(height / 320))
+        _stripDynamic(ctx, view, frame)
+        _dialDynamic(ctx, view, frame)
+        _centerDynamic(ctx, view, frame)
         if frame.dim < 1 {
             ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: CGFloat(1 - frame.dim)))
             ctx.fill(CGRect(x: 0, y: 0, width: 480, height: 320))

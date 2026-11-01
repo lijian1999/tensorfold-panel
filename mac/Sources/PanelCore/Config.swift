@@ -19,7 +19,7 @@ public struct Config: Equatable, Sendable {
     public var prefillShortS: Double = 3.0        // 短预填充阈值
     public var doneHoldS: Double = 4.0            // 完成画面停留
     public var dimAfterS: Double = 1800.0         // 空闲多久后调暗
-    public var animFps: Double = 10.0             // 持续动画（解码、预填充期间）的帧率；切换画面的淡入固定 30
+    public var animFps: Double = 60.0             // 持续动画（解码、预填充期间）的帧率；切换画面的淡入固定 30；60fps 配双层绘制
     public var timezone: String = "America/Los_Angeles"
     /// 按模型的单价（所选货币 / 百万 token），键是引擎给的模型名原文；没有的模型不算费用
     public var prices: [String: ModelPrice] = [:]

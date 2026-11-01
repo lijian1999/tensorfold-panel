@@ -30,7 +30,7 @@ import Testing
         #expect(c.currency == "$")
         #expect(c.prices.isEmpty)
         #expect(c.roundGapS == 60)
-        #expect(c.animFps == 10)
+        #expect(c.animFps == 60)
         #expect(c.modelName == "未加载模型")
     }
 
