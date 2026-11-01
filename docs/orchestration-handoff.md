@@ -1,5 +1,25 @@
 # 交接：Mac 版副屏仪表盘
 
+## 进行中（2026-11-01）：分支 `mac-60fps`，方案②：60fps 静态/动态分层渲染
+
+目标：持续动画帧率默认 10 → 60，但不增加 CPU/解码拖慢。用户已确认方案②并授权自行决策；设计文档、接口约定已改好（见下），**代码还没动**。
+
+### 已完成（已在 `mac-60fps` 分支提交）
+
+- `docs/design-mac.md` 三处：整体架构 App 条目补两层画法；“defaults write”清单里动画帧率（10）→（60，可设 1–60）；已定事项加一条（2026-11-01，含“预期稳定解码 CPU 与 10 帧持平，约 5% 单核，实现后实测核对”）。
+- `docs/tasks/mac/00-contracts.md`：Config 行加例外说明——`animFps` mac 版默认 60（可设 1–60），Python 版仍是 10。
+- 原型不用改：动画本来就是 requestAnimationFrame（原生约 60fps），原型已经是 60fps 的效果。
+- 实测依据：稳定解码 2 倍屏 10fps 全帧画 = 5.5% 单核（提交 b8d2054）；临时基准测纯光栅 0.634 ms/帧（临时文件已删）。稳定解码时每帧真变的只有：流指示点脉冲、数值弧、进度条、主数字（文字本身节流 4Hz）。
+
+### 待做：代码实现计划
+
+1. `mac/Sources/PanelRender/Renderer.swift`：把 `draw` 拆成 `drawStatic` + `drawDynamic`。静态 = 背景、状态条文字、底环和缺口、离线文字/标题行、刻度数字、右侧三栏；动态 = 流指示点、灰点、数值弧、主数字、进度条整块、调暗遮罩。`draw()` 本身重构成先静态后动态的同一批元素函数，行为不变（RenderTests 逐像素断言会抓回归）。正确性条件：各路不透明度和 dim 全为 1（稳定画面）时，两趟先后画与 `draw()` 逐像素一致；组不透明度 <1（淡入中）时 _block 的透明图层语义会改变合成顺序，所以淡入期间必须整帧画。注意交叉叠序已逐一核实：圆点与状态条文字、弧与刻度数字/标题、弧与卡片互不重叠；弧→主数字的先后关系保持。
+2. `mac/Sources/TFPanel/PanelView.swift`：单层改双层（容器层下加静态层 + 动态层，各带 delegate）。每拍只 step 一次动画（帧存起来给两层共用，不能各画各的 step）。稳定帧（各 α 与 dim ≥0.999）时静态层 drawStatic、动态层 drawDynamic，重画定时器只驱动动态层；非稳定帧静态层画整帧 draw()、动态层清空。静态层重画时机：换画面数据、缩放变、模式切换。`frameIntervalMs` 钳制 1–30 → 1–60（下限 33ms → 16ms；淡入仍固定 33ms）。
+3. `mac/Sources/PanelCore/Config.swift`：`animFps` 默认 10.0 → 60.0（AppSettings 读同名键，无需改）。
+4. 测试：新增套件（RenderTests 风格）——(a) 每个稳定样例：drawStatic+drawDynamic 与 draw() 逐像素一致（容差 0–1）；(b) 同一 view、两个不同 frame 的 drawStatic 输出逐像素一致（证明静态层可缓存）；(c) 已有测试全不动。若有断言 Config 默认 10 的测试一并改 60。
+5. 完成检查：`cd mac && swift build && swift test`；再用临时基准测 drawStatic / drawDynamic+清屏耗时，推算 60fps CPU 写进交接文件；真机实测（活动监视器 + 实解码）留给用户/Studio。
+6. 实测 CPU 的办法：`mac/dist/TFPanel.app/Contents/MacOS/TFPanel --no-mode-switch` 跑真实解码，活动监视器看 TFPanel CPU；超标就把 `anim_fps` 降（defaults 域 `com.tensorfold.panel`）或把动态层范围收窄，再不行退 30fps。
+
 ## 完工报告（2026-10-30）
 
 目标：按设计文档 `docs/design-mac.md` 和原型 `docs/dashboard-prototype.html` 完整实现 Mac 版（全 Swift、一个进程、只接 oMLX），沿用派工方式（pi 执行、编排者验收）。代码在分支 `mac-v3`，`cd mac && swift test`：PanelCore 269 个 + PanelRender 15 个测试全过；`mac/scripts/build-app.sh` 出 `mac/dist/TFPanel.app`。

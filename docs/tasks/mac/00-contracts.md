@@ -26,7 +26,7 @@ Swift 包在 `mac/`，在 `mac/` 目录下运行 `swift build`、`swift test`。
 
 ## 2. 已有的基础（读源码即可，这里只列名字）
 
-- `Config`：`roundGapS`、`prefillShortS`、`doneHoldS`、`dimAfterS`、`animFps`、`timezone`、`priceInput`、`priceCached`、`priceOutput`、`currency`、`stateDir`、`modelName`，含义和默认值同 Python 的 `Config` 里同名字段（`round_gap_s` → `roundGapS`）。Python 的 `base_url`、`base_urls`、`monitor_*` 在 Mac 版没有。
+- `Config`：`roundGapS`、`prefillShortS`、`doneHoldS`、`dimAfterS`、`animFps`、`timezone`、`priceInput`、`priceCached`、`priceOutput`、`currency`、`stateDir`、`modelName`，含义和默认值同 Python 的 `Config` 里同名字段（`round_gap_s` → `roundGapS`）；唯一例外：`animFps` mac 版默认 60（可设 1–60），Python 版仍是 10。Python 的 `base_url`、`base_urls`、`monitor_*` 在 Mac 版没有。
 - `Fmt.swift`：`jsRound(_:) -> Int`、`tokFmt(_:)`、`split1(_:) -> (String, String)`、`costFmt(_:currency:)`、`durFmt(_:)`、`dateLabel(_:)`、`pct(_:_:)`，参数都是 `Double`（`pct` 的第二个是 `Double?`）。Python 各模块里自己定义的 `js_round` 一律用这里的 `jsRound`。
 - `Scale.swift`：`tickFracs`、`scales`（`[String: GaugeScale]`，`GaugeScale` 有 `ticks`、`labels`）、`v2f(_ v: Double?, _ scale: String) -> Double`。
 - `View.swift`：`Seg`、`Lanes`、`Card`、`Bar`、`View`，字段同 Python 的 `view.py`，名字换成驼峰（`state_name` → `stateName`，`big_int` → `bigInt`，`pill_kind` → `pillKind`）。Python 里 `None` 的字段在 Swift 里是可选值。构造：`Seg("文字")`、`Seg("6.2K", "strong")`、`Card("输出", "24.6K", "tok", "", false)`（参数顺序同 Python 的位置参数，后面的可省略）、`Lanes(max:decoding:prefilling:waiting:offline:)`、`Bar(kind:frac:level:text:)`、`View()` 再逐个赋值。`toJSON()`、`View(json:)` 对应 `to_dict`、`from_dict`。
