@@ -323,7 +323,7 @@ public func readSystemMemory() -> JSON?
 /// 单调时钟（秒），给轮询和动画用
 public func monotonicNow() -> Double
 
-/// 引擎读取：OmlxReader 满足它；测试里换成假的
+/// 引擎读取：OmlxReader、TensorfoldReader 满足它；测试里换成假的
 public protocol EngineSource: AnyObject {
     var issue: EngineIssue { get }
     var modelIDs: [String] { get }
@@ -404,3 +404,90 @@ enum LoginItem {
     static func set(_ on: Bool) -> Bool          // 登记 / 取消，成功返回 true
 }
 ```
+
+## 10. 第四批（T 系列）：TensorFold 引擎
+
+设计见 `docs/design-mac.md` 2026-11-07 增补的“引擎：TensorFold”“引擎的选择”两节，实测实录在 `fixtures/tensorfold/`（`idle.jsonl` 空闲基线、`scenarios.jsonl` 九种场景；每行是 `{"t","ep","status","body"}`，`body` 是对应端点的原始文本，测试按时间顺序回放喂给适配器）。本节和前面各节冲突时以本节为准。采集器、账本、视图模型、动画、绘制、轮询一行不改，`OmlxReader` 不动。
+
+### 10.1 文件
+
+| 文件 | 内容 | 谁写 |
+| --- | --- | --- |
+| `mac/Sources/PanelCore/Prometheus.swift` | Prometheus 文本解析 `PrometheusText` | 任务 T1，新建 |
+| `mac/Sources/PanelCore/Tensorfold.swift` | `TensorfoldAdapter`、`TensorfoldReader` | 任务 T2，新建 |
+| `mac/Tests/PanelCoreTests/PrometheusTests.swift` | 解析的测试（构造样例文本 + fixtures 抽样） | 任务 T1 |
+| `mac/Tests/PanelCoreTests/TensorfoldTests.swift` | 适配器和读取的测试，用 fixtures 回放 | 任务 T2 |
+| `mac/Sources/PanelCore/AppSettings.swift` | `engine` 加取值、key 策略 | 任务 T2 |
+| `mac/Sources/TFPanel/` | 引擎下拉框加一项、EngineIssue 文案 | 任务 T2 |
+
+### 10.2 Prometheus 解析（T1，`Prometheus.swift`）
+
+```swift
+public struct PrometheusText: Sendable, Equatable {
+    public init(_ text: String)
+    /// 无标签样本的值；家族不存在、样本不是数 → nil
+    public func number(_ family: String) -> Double?
+    /// 一个带标签家族的全部样本：标签值 → 数（`tensorfold:kv_cache_usage_ratio{pool="3"} 0.5` → "3": 0.5）
+    public func numbers(_ family: String) -> [String: Double]
+}
+```
+
+- 只做文本格式：`# HELP`、`# TYPE` 注释行忽略；样本行是 `家族{标签} 值 [时间戳]`，时间戳有就忽略；整型、负数、指数记法都要能读。解析不判语义：`_sum`、`_count` 是无标签样本，用 `number` 读；`_bucket{le="…"}` 落在 `numbers` 里。
+- 同一文本里一个家族出现多行（每个标签一行）时，无标签的取最后一行，带标签的逐行都收。
+
+### 10.3 适配器和读取（T2，`Tensorfold.swift`）
+
+```swift
+public final class TensorfoldAdapter {
+    public init()
+    /// health：/health 的解析结果；models：/v1/models 的 data 数组；metrics：/metrics 的解析结果。
+    /// 哪个是 nil 就当这次没读到它。health 不是 JSON 对象 → 返回 nil（这次读不到）。
+    /// 适配器无状态：同样的输入得到同样的输出，不记上一次。
+    public func feed(now: Double, health: JSON?, models: JSON?, metrics: PrometheusText?) -> (health: JSON, metrics: JSON)?
+}
+```
+
+字段逐个照设计文档“统一读数各字段”表。写死几处：
+
+- `epoch`：`process_start_time_seconds` 取整到 10 秒（`(x / 10).rounded(.down) * 10`，整数）。
+- `streams`：`prefilling` = `filling_prompt_tokens_left > 0` 算 1 否则 0；`decoding` = `max(0, requests_running − prefilling)`；`max` = `/health` 的 `max_batch_size`（是数且大于 0），否则 8。
+- `usage_totals`：`{prompt, cached, completion, requests}` 四项。`completion` = `generation_tokens_total − generation_tokens_running`（后者缺就取前者）；`cached` 缺按 0。
+- 缺失就缺失：`drafted_total`、`accepted_total`、`aborted_total`、`ttft_sum`、`ttft_count`、`kv_usage`、`waiting` 各自的家族不在就**不带这个键**，不造假零。
+- `kv_usage`：`tensorfold:kv_cache_usage_ratio{pool=…}` 的值数组，按 pool 名的数值升序（pool 不是数的忽略）。
+
+```swift
+public final class TensorfoldReader: EngineSource {
+    public init(transport: HTTPTransport, apiKey: String? = nil)
+    public var apiKey: String?
+    public private(set) var issue: EngineIssue          // 最近一次读的结果
+    public private(set) var modelIDs: [String]          // /health 的 model_ids；没有（配了 key）就用 /v1/models 的 id 列表
+    public var modelName: String? { get }               // /health 的 model；缺取 modelIDs 第一个
+    public func read(now: Double, wall: Double) -> (health: JSON, metrics: JSON)?   // nil = 这次读不到
+    public func reset()                                  // 清 issue/modelIDs/modelName，适配器无状态无需清
+}
+```
+
+- 每次读三个 GET：`/health`、`/metrics`、`/v1/models`（不读 `/v1/load`，它有的字段 metrics 都发布）。`/metrics` 或 `/v1/models` 失败时这次返回 nil。
+- 认引擎：`/health` 是 200 且 JSON 对象、带 `version` 和 `backend` → 认出。200 但只有 `status`（配了 key）→ 拿 `/metrics` 试探：200 认出；401 → `.needsKeyTensorfold`；其他 → `.notTensorfold`。200 的 JSON 不带 `version`/`backend` → `.notTensorfold`；非 200 或连不上 → `.unreachable`。
+- 读成功 → `issue` 回 `.none`。
+
+### 10.4 EngineIssue 增补（与 8.3 冲突以本节为准）
+
+```swift
+public enum EngineIssue: String, Sendable {
+    case none, unreachable, notOmlx, needsKey
+    case notTensorfold, needsKeyTensorfold              // T 系列新增
+    public var message: String? { get }
+    // none → nil；unreachable → "未连接"；notOmlx → "这个地址上不是 oMLX"
+    // needsKey → "oMLX 需要 API key · 在设置里填写"
+    // notTensorfold → "这个地址上不是 TensorFold"
+    // needsKeyTensorfold → "TensorFold 需要 API key · 在设置里填写"
+}
+```
+
+### 10.5 设置和 app（T2）
+
+- `AppSettings.engine`：键不变（`"engine"`，默认 `"omlx"`），取值多一个 `"tensorfold"`。
+- 默认地址按引擎：oMLX `127.0.0.1:8000`，TensorFold `127.0.0.1:8080`。切换引擎时，当前地址还等于原引擎的默认值 → 换成新引擎的默认值；用户手改过的地址不动。
+- `apiKey()`：自动模式只在 engine 为 `"omlx"` 时读 `~/.omlx/settings.json`；engine 为 `"tensorfold"` 返回 nil（TensorFold 默认无 key，手动模式用户填了才带）。
+- 两个引擎的传输层都用 `makeTransport` 建；轮询、`Poller` 不感知引擎种类（`EngineSource`）。
