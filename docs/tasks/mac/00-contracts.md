@@ -413,12 +413,12 @@ enum LoginItem {
 
 | 文件 | 内容 | 谁写 |
 | --- | --- | --- |
-| `mac/Sources/PanelCore/Prometheus.swift` | Prometheus 文本解析 `PrometheusText` | 任务 T1，新建 |
-| `mac/Sources/PanelCore/Tensorfold.swift` | `TensorfoldAdapter`、`TensorfoldReader` | 任务 T2，新建 |
-| `mac/Tests/PanelCoreTests/PrometheusTests.swift` | 解析的测试（构造样例文本 + fixtures 抽样） | 任务 T1 |
-| `mac/Tests/PanelCoreTests/TensorfoldTests.swift` | 适配器和读取的测试，用 fixtures 回放 | 任务 T2 |
-| `mac/Sources/PanelCore/AppSettings.swift` | `engine` 加取值、key 策略 | 任务 T2 |
-| `mac/Sources/TFPanel/` | 引擎下拉框加一项、EngineIssue 文案 | 任务 T2 |
+| `mac/Sources/PanelCore/Prometheus.swift` | Prometheus 文本解析 `PrometheusText` | 任务 TF1，新建 |
+| `mac/Sources/PanelCore/Tensorfold.swift` | `TensorfoldAdapter`、`TensorfoldReader` | 任务 TF2，新建 |
+| `mac/Tests/PanelCoreTests/PrometheusTests.swift` | 解析的测试（构造样例文本 + fixtures 抽样） | 任务 TF1 |
+| `mac/Tests/PanelCoreTests/TensorfoldTests.swift` | 适配器和读取的测试，用 fixtures 回放 | 任务 TF2 |
+| `mac/Sources/PanelCore/AppSettings.swift` | `engine` 加取值、key 策略 | 任务 TF2 |
+| `mac/Sources/TFPanel/` | 引擎下拉框加一项、EngineIssue 文案 | 任务 TF2 |
 
 ### 10.2 Prometheus 解析（T1，`Prometheus.swift`）
 
