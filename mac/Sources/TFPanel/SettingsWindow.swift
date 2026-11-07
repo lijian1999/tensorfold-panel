@@ -23,7 +23,7 @@ final class SettingsModel: ObservableObject {
     private let controller: AppController
 
     // 引擎页
-    @Published var engineChoice = "oMLX"      // 这一版只有 oMLX 一项
+    @Published var engineChoice = "omlx"      // omlx / tensorfold，跟设置里的 engine 对应
     @Published var addressText = ""
     @Published var keyMode: KeyMode = .auto
     @Published var manualKeyText = ""
@@ -39,6 +39,7 @@ final class SettingsModel: ObservableObject {
     init(controller: AppController) {
         self.controller = controller
         let s = controller.settings
+        engineChoice = s.engine == "tensorfold" ? "tensorfold" : "omlx"
         addressText = s.address
         keyMode = s.keyMode
         manualKeyText = s.manualKey
@@ -51,6 +52,7 @@ final class SettingsModel: ObservableObject {
     /// 打开窗口时从设置重新取各输入框的文字（保留已有的行编辑内容）。
     func reload() {
         let s = controller.settings
+        engineChoice = s.engine == "tensorfold" ? "tensorfold" : "omlx"
         addressText = s.address
         keyMode = s.keyMode
         manualKeyText = s.manualKey
@@ -99,7 +101,14 @@ final class SettingsModel: ObservableObject {
         )
     }
 
-    // MARK: - 马上生效的（分段控件、删除按钮）
+    // MARK: - 马上生效的（分段控件、下拉框、删除按钮）
+
+    /// 换引擎：写进设置（engine 的 setter 会把默认地址跟着换），立刻生效。
+    func applyEngine(_ name: String) {
+        engineChoice = name
+        controller.settings.engine = name
+        controller.settingsChanged()
+    }
 
     func applyKeyMode(_ mode: KeyMode) {
         keyMode = mode
@@ -256,12 +265,16 @@ private struct SettingsRootView: SwiftUI.View {
         VStack(alignment: .leading, spacing: 8) {
             formRow("引擎") {
                 Picker("", selection: $model.engineChoice) {
-                    Text("oMLX").tag("oMLX")
+                    Text("oMLX").tag("omlx")
+                    Text("TensorFold").tag("tensorfold")
                 }
                 .labelsHidden()
                 .frame(width: 160)
+                .onChange(of: model.engineChoice) { _, name in
+                    model.applyEngine(name)
+                }
             }
-            note("这一版只有 oMLX；以后接入的引擎会出现在这里")
+            note("换引擎会自动换成那个引擎的默认地址；手改过的地址不动")
             formRow("接口地址") {
                 TextField("", text: $model.addressText)
                     .textFieldStyle(.roundedBorder)
@@ -280,7 +293,9 @@ private struct SettingsRootView: SwiftUI.View {
                 }
             }
             if model.keyMode == .auto {
-                note("读 ~/.omlx/settings.json 里的 auth.api_key")
+                note(model.engineChoice == "tensorfold"
+                     ? "TensorFold 默认不设 API key，自动模式不读任何文件"
+                     : "读 ~/.omlx/settings.json 里的 auth.api_key")
             } else {
                 formRow(" ") {
                     SecureField("", text: $model.manualKeyText)

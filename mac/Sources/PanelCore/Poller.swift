@@ -98,9 +98,10 @@ public final class Poller: @unchecked Sendable {
             snapshot = lastSnapshot ?? .object(["state": .string("offline")])
             interval = 0.5
         } else {
-            // 7. 引擎有问题时带上一句话
+            // 7. 引擎有问题时带上一句话（未连接不带：菜单自有文案）
             let issue = source.issue
-            if issue == .notOmlx || issue == .needsKey, let msg = issue.message {
+            if issue == .notOmlx || issue == .needsKey
+                || issue == .notTensorfold || issue == .needsKeyTensorfold, let msg = issue.message {
                 var o = snapshot.object ?? [:]
                 o["engine_note"] = .string(msg)
                 snapshot = .object(o)

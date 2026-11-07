@@ -174,4 +174,58 @@ import Testing
         #expect(s.knownModels == ["A", "C"])
         #expect(s.prices.isEmpty)
     }
+
+    // MARK: - TensorFold（T 系列）新增
+
+    @Test func test_切引擎换默认地址() {
+        let (name, d) = makeDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        let s = AppSettings(defaults: d)
+        #expect(s.engine == "omlx")
+        #expect(s.address == "127.0.0.1:8000")
+        // 切到 TensorFold：地址还是 oMLX 的默认值 → 跟着换成 8080
+        s.engine = "tensorfold"
+        #expect(s.address == "127.0.0.1:8080")
+        // 再切回来：地址跟着换成 8000
+        s.engine = "omlx"
+        #expect(s.address == "127.0.0.1:8000")
+        // 引擎值存得进、读得回
+        s.engine = "tensorfold"
+        #expect(AppSettings(defaults: d).engine == "tensorfold")
+    }
+
+    @Test func test_手改地址换引擎不换地址() {
+        let (name, d) = makeDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        let s = AppSettings(defaults: d)
+        s.address = "10.0.0.2:9999"
+        s.engine = "tensorfold"
+        #expect(s.address == "10.0.0.2:9999")
+        s.engine = "omlx"
+        #expect(s.address == "10.0.0.2:9999")
+    }
+
+    @Test func test_tensorfold自动模式不读key文件() {
+        let (name, d) = makeDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tfpanel-test-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("settings.json")
+        try! #"{"auth": {"api_key": "k1"}}"#.write(to: file, atomically: true, encoding: .utf8)
+        let s = AppSettings(defaults: d)
+        s.keyMode = .auto
+        // TensorFold：自动模式不读任何文件
+        s.engine = "tensorfold"
+        #expect(s.apiKey(settingsPath: file.path) == nil)
+        // oMLX：自动模式照旧读配置文件
+        s.engine = "omlx"
+        #expect(s.apiKey(settingsPath: file.path) == "k1")
+        // TensorFold 手动模式填了就带
+        s.engine = "tensorfold"
+        s.keyMode = .manual
+        s.manualKey = "k2"
+        #expect(s.apiKey(settingsPath: file.path) == "k2")
+    }
 }

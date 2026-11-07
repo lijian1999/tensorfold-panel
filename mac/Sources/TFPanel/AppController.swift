@@ -21,9 +21,10 @@ final class AppController {
     private let viewModel: ViewModel
     private var config: Config
     private let poller: Poller
-    private var reader: OmlxReader
-    private var readerAddress: String     // 当前读取器的地址
-    private var readerKey: String?        // 当前读取器的 API key
+    private var reader: EngineSource     // 当前读取器（oMLX 或 TensorFold）
+    private var readerAddress: String    // 当前读取器的地址
+    private var readerEngine: String     // 当前读取器的引擎
+    private var readerKey: String?       // 当前读取器的 API key
     private var keyCheckAt = -Double.infinity    // auto 模式下 needsKey 的上次检查时刻
     private let box: Box                  // 和 PanelView 共享的画面/帧率
 
@@ -31,6 +32,15 @@ final class AppController {
     private final class Box {
         var view: View?
         var animFps: Double = 10
+    }
+
+    /// 按引擎建读取器；两个引擎的传输层都用 makeTransport
+    private static func makeReader(engine: String, address: String, key: String?) -> EngineSource {
+        if engine == "tensorfold" {
+            return TensorfoldReader(transport: makeTransport(baseURL: address), apiKey: key)
+        }
+        return OmlxReader(transport: makeTransport(baseURL: address),
+                          apiKey: key, maxStreams: omlxMaxStreams())
     }
 
     init(noModeSwitch: Bool) {
@@ -48,8 +58,7 @@ final class AppController {
         let viewModel = ViewModel(config: config)
         let address = settings.address
         let key = settings.apiKey()
-        let reader = OmlxReader(transport: makeTransport(baseURL: address),
-                                apiKey: key, maxStreams: omlxMaxStreams())
+        let reader = Self.makeReader(engine: settings.engine, address: address, key: key)
         let box = Box()
         box.animFps = config.animFps
 
@@ -60,6 +69,7 @@ final class AppController {
         self.viewModel = viewModel
         self.reader = reader
         self.readerAddress = address
+        self.readerEngine = settings.engine
         self.readerKey = key
         self.box = box
         self.poller = Poller(source: reader, collector: collector)
@@ -124,12 +134,18 @@ final class AppController {
         }
     }
 
-    /// 换 key 生效：交给轮询线程改读取器。
+    /// 换 key 生效：交给轮询线程改读取器，分引擎改（TensorFold 的 key 来自设置，手动模式才有）。
     private func applyKey(_ key: String?) {
         readerKey = key
         let poller = self.poller
         poller.perform {
-            if let r = poller.source as? OmlxReader { r.apiKey = key; r.reset() }
+            if let r = poller.source as? OmlxReader {
+                r.apiKey = key
+                r.reset()
+            } else if let r = poller.source as? TensorfoldReader {
+                r.apiKey = key
+                r.reset()
+            }
         }
     }
 
@@ -144,14 +160,15 @@ final class AppController {
 
         let address = settings.address
         let key = settings.apiKey()
-        if address != readerAddress {
-            // 地址变了：整个读取器换掉
-            let reader = OmlxReader(transport: makeTransport(baseURL: address),
-                                    apiKey: key, maxStreams: omlxMaxStreams())
+        let engine = settings.engine
+        if address != readerAddress || engine != readerEngine {
+            // 地址或引擎变了：整个读取器换掉（换引擎、换地址都相当于引擎重启）
+            let reader = Self.makeReader(engine: engine, address: address, key: key)
             let poller = self.poller
             poller.perform { poller.source = reader }
             self.reader = reader
             readerAddress = address
+            readerEngine = engine
             readerKey = key
         } else if key != readerKey {
             applyKey(key)

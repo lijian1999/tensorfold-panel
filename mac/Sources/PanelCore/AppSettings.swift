@@ -34,13 +34,26 @@ public final class AppSettings {
 
     // MARK: - 各项设置
 
+    /// 各引擎的默认地址
+    private static func defaultAddress(_ engine: String) -> String {
+        engine == "tensorfold" ? "127.0.0.1:8080" : "127.0.0.1:8000"
+    }
+
     public var engine: String {
         get { trimmedString("engine", "omlx") }
-        set { defaults.set(newValue, forKey: "engine") }
+        set {
+            // 改引擎时：地址还等于原引擎的默认值 → 跟着换成新引擎的默认值；用户手改过的地址不动
+            let oldAddress = address
+            let oldDefault = Self.defaultAddress(engine)
+            defaults.set(newValue, forKey: "engine")
+            if oldAddress == oldDefault {
+                address = Self.defaultAddress(newValue)
+            }
+        }
     }
 
     public var address: String {
-        get { trimmedString("address", "127.0.0.1:8000") }
+        get { trimmedString("address", Self.defaultAddress(engine)) }
         set { defaults.set(newValue, forKey: "address") }
     }
 
@@ -126,7 +139,10 @@ public final class AppSettings {
 
     public func apiKey(settingsPath: String = "~/.omlx/settings.json") -> String? {
         switch keyMode {
-        case .auto: return omlxApiKey(settingsPath: settingsPath)
+        case .auto:
+            // 自动模式只有 oMLX 读配置文件；TensorFold 默认无 key，不读任何文件
+            guard engine == "omlx" else { return nil }
+            return omlxApiKey(settingsPath: settingsPath)
         case .manual: return manualKey.isEmpty ? nil : manualKey
         }
     }

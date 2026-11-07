@@ -160,6 +160,15 @@ private func rowOf(_ line: JSON) -> (health: JSON, metrics: JSON)? {
         src3.issue = .unreachable
         let s3 = tickToOffline(p3, clk3)
         #expect(s3["engine_note"] == nil)
+        // TensorFold 的两个分支也带
+        let (p4, src4, clk4, _) = makePair(lines: [], issue: .notTensorfold)
+        src4.issue = .notTensorfold
+        let s4 = tickToOffline(p4, clk4)
+        #expect(s4["engine_note"] == .string("这个地址上不是 TensorFold"))
+        let (p5, src5, clk5, _) = makePair(lines: [], issue: .needsKeyTensorfold)
+        src5.issue = .needsKeyTensorfold
+        let s5 = tickToOffline(p5, clk5)
+        #expect(s5["engine_note"] == .string("TensorFold 需要 API key · 在设置里填写"))
     }
 
     /// 一直 tick 到离线（每拍时钟加 0.5，最多 10 拍）

@@ -111,7 +111,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         } else {
             noteRow.isHidden = true
         }
-        engineRow.title = engineMenuText(issue: controller.issue, address: s.address)
+        engineRow.title = engineMenuText(issue: controller.issue, address: s.address, engine: s.engine)
         // 副屏没接上时「副屏截图」置灰
         shotRow.isEnabled = controller.screens.isSecondaryConnected
 

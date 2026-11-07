@@ -198,6 +198,7 @@ public func makeTransport(baseURL: String, timeout: Double = 0.5) -> HTTPTranspo
 
 public enum EngineIssue: String, Sendable {
     case none, unreachable, notOmlx, needsKey
+    case notTensorfold, needsKeyTensorfold   // T 系列新增
 
     public var message: String? {
         switch self {
@@ -205,6 +206,8 @@ public enum EngineIssue: String, Sendable {
         case .unreachable: return "未连接"
         case .notOmlx: return "这个地址上不是 oMLX"
         case .needsKey: return "oMLX 需要 API key · 在设置里填写"
+        case .notTensorfold: return "这个地址上不是 TensorFold"
+        case .needsKeyTensorfold: return "TensorFold 需要 API key · 在设置里填写"
         }
     }
 }

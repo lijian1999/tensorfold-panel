@@ -5,10 +5,12 @@ import Testing
 
 @Suite struct TestMenuText {
     @Test func test_引擎一行() {
-        #expect(engineMenuText(issue: .none, address: "127.0.0.1:8000") == "引擎：oMLX · 127.0.0.1:8000")
-        #expect(engineMenuText(issue: .unreachable, address: "127.0.0.1:8000") == "引擎：未连接")
-        #expect(engineMenuText(issue: .notOmlx, address: "127.0.0.1:8000") == "引擎：这个地址上不是 oMLX")
-        #expect(engineMenuText(issue: .needsKey, address: "127.0.0.1:8000") == "引擎：oMLX 需要 API key · 在设置里填写")
+        #expect(engineMenuText(issue: .none, address: "127.0.0.1:8000", engine: "omlx") == "引擎：oMLX · 127.0.0.1:8000")
+        #expect(engineMenuText(issue: .unreachable, address: "127.0.0.1:8000", engine: "omlx") == "引擎：未连接")
+        #expect(engineMenuText(issue: .notOmlx, address: "127.0.0.1:8000", engine: "omlx") == "引擎：这个地址上不是 oMLX")
+        #expect(engineMenuText(issue: .needsKey, address: "127.0.0.1:8000", engine: "omlx") == "引擎：oMLX 需要 API key · 在设置里填写")
+        #expect(engineMenuText(issue: .none, address: "127.0.0.1:8080", engine: "tensorfold") == "引擎：TensorFold · 127.0.0.1:8080")
+        #expect(engineMenuText(issue: .none, address: "127.0.0.1:8000", engine: "别的") == "引擎：oMLX · 127.0.0.1:8000")
     }
 
     @Test func test_时区标题() {

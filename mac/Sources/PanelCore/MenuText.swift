@@ -1,14 +1,15 @@
 // 菜单栏里的文字规则（纯逻辑，供 TFPanel 的菜单用）。
 import Foundation
 
-/// 菜单里引擎那一行。
-public func engineMenuText(issue: EngineIssue, address: String) -> String {
+/// 菜单里引擎那一行。engine 是设置里的引擎值（"omlx" / "tensorfold"）。
+public func engineMenuText(issue: EngineIssue, address: String, engine: String) -> String {
+    let name = engine == "tensorfold" ? "TensorFold" : "oMLX"
     switch issue {
     case .none:
-        return "引擎：oMLX · \(address)"
+        return "引擎：\(name) · \(address)"
     case .unreachable:
         return "引擎：未连接"
-    case .notOmlx, .needsKey:
+    case .notOmlx, .needsKey, .notTensorfold, .needsKeyTensorfold:
         return "引擎：" + issue.message!
     }
 }
