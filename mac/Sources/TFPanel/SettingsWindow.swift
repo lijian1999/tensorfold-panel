@@ -107,6 +107,7 @@ final class SettingsModel: ObservableObject {
     func applyEngine(_ name: String) {
         engineChoice = name
         controller.settings.engine = name
+        addressText = controller.settings.address   // setter 可能换了默认地址，同步显示
         controller.settingsChanged()
     }
 

@@ -25,13 +25,20 @@ public final class TensorfoldAdapter {
         let promptTotal = truncInt(m.number("tensorfold:prompt_tokens_total") ?? 0)
         let cachedTotal = truncInt(m.number("tensorfold:prompt_tokens_cached_total") ?? 0)
         let requestsTotal = truncInt(m.number("tensorfold:request_latency_seconds_count") ?? 0)
+        // TF native 的 latency_count 把客户端断开的请求也算成"结束"（实测 2026-11-07：
+        // 13 发起 = 13 结束，其中 1 次断开）。"本轮请求/账本请求数"的口径是正常结束，
+        // 不含断开 → 减掉 client_disconnections_total（缺失按 0）。token 侧不用减：
+        // prompt_tokens_total 本来就不含断开的提示，generation_tokens_total 含断开前
+        // 已生成的输出，正是"断开带走的用量"。
+        let disconnections = truncInt(m.number("tensorfold:client_disconnections_total") ?? 0)
+        let successTotal = max(0, requestsTotal - disconnections)
 
         var out: [String: JSON] = [
             "ok": .bool(true),
             "backend": .string("tensorfold"),
             "requests_running": .int(running),
             "streams": Self.streams(running: running, health: h, metrics: m),
-            "requests_total": .int(requestsTotal),
+            "requests_total": .int(successTotal),
             "prompt_tokens_total": .int(promptTotal),
             "cached_tokens_total": .int(cachedTotal),
             "completion_tokens_total": .int(truncInt(genTotal)),
@@ -39,7 +46,7 @@ public final class TensorfoldAdapter {
             "decode_seconds_total": .double(m.number("tensorfold:request_decode_seconds_sum") ?? 0.0),
             "completion_finished_total": .int(finished),
             "usage_totals": ["prompt": .int(promptTotal), "cached": .int(cachedTotal),
-                             "completion": .int(finished), "requests": .int(requestsTotal)],
+                             "completion": .int(finished), "requests": .int(successTotal)],
             "context_length": .int(Self.contextLength(models: models, health: h)),
         ]
         // epoch：process_start_time_seconds 取整到 10 秒；缺 → .null

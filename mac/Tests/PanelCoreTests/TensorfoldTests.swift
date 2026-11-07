@@ -100,7 +100,8 @@ tensorfold:filling_prompt_tokens_left 500
         #expect(isInt(h["requests_running"]))
         let streamsWant: JSON = ["decoding": 3, "prefilling": 0, "max": 8]
         #expect(h["streams"] == streamsWant)
-        #expect(h["requests_total"] == 9)
+        // requests_total = latency_count − 断开数（9 − 2 = 7，正常结束口径）
+        #expect(h["requests_total"] == 7)
         #expect(isInt(h["requests_total"]))
         #expect(h["prompt_tokens_total"] == 1000)
         #expect(h["cached_tokens_total"] == 200)
@@ -115,7 +116,7 @@ tensorfold:filling_prompt_tokens_left 500
         #expect(h["epoch"] == 1794046700)   // (1794046709 / 10).rounded(.down) * 10
         #expect(isInt(h["epoch"]))
         #expect(h["completion_finished_total"] == 4993)   // 5000 − 7
-        let utWant: JSON = ["prompt": 1000, "cached": 200, "completion": 4993, "requests": 9]
+        let utWant: JSON = ["prompt": 1000, "cached": 200, "completion": 4993, "requests": 7]
         #expect(h["usage_totals"] == utWant)
         #expect(h["context_length"] == 8192)
         let m = r.metrics
@@ -267,7 +268,7 @@ tensorfold:filling_prompt_tokens_left 500
         #expect(rd.modelName == "M")
         let h = r!.health
         #expect(h["backend"] == "tensorfold")
-        #expect(h["requests_total"] == 9)      // 读数来自 /metrics 的文本
+        #expect(h["requests_total"] == 7)      // 读数来自 /metrics 的文本（9 − 断开 2）
         #expect(h["completion_finished_total"] == 4993)
         #expect(h["epoch"] == 1794046700)
         #expect(r!.metrics["waiting"] == 2)
@@ -294,7 +295,7 @@ tensorfold:filling_prompt_tokens_left 500
         #expect(t.lastHeaders("/v1/models")?["Authorization"] == "Bearer k1")
         // /health 永远不带头
         #expect(t.lastHeaders("/health")?.isEmpty == true)
-        #expect(r!.health["requests_total"] == 9)
+        #expect(r!.health["requests_total"] == 7)
     }
 
     @Test func test_试探401时needsKeyTensorfold() {
