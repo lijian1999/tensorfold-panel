@@ -21,11 +21,11 @@
 
 - 副屏上的画面和 Spark 版一模一样（换了引擎的地方见下文）。
 - 不用命令行：装好之后只跟菜单栏图标打交道。
-- 引擎在设置里选。这一版只把 oMLX 做好；以后接别的引擎（TensorFold、vLLM 等）就是在这里多一项，再写一个适配器。
+- 引擎在设置里选。这一版做好 oMLX 和 TensorFold（TensorFold 为 2026-11-07 增补，见“引擎：TensorFold”）；以后接别的引擎（vLLM 等）还是在这里多一项，再写一个适配器。
 
 本版不做：
 
-- vLLM、TensorFold（Mac 版和 CUDA 版都不做）。TensorFold 正在快速迭代，等它稳定了再接；适配器的写法留着，以后照 oMLX 的方式加。
+- vLLM（等需要时再接，Spark 版的适配器可以照着翻）。TensorFold 1.2.2 native 已接入（2026-11-07，见“引擎：TensorFold”）。
 - 监控别的机器上的引擎（地址可以填远程的，但不保证、不测试）。
 - 每条流各自的速度、GPU 功耗和温度（和 Spark 版一样不做）。
 - 上架、公证：只给自己用，本机 ad-hoc 签名。
@@ -40,6 +40,7 @@
 | 系统 | macOS 26.7.1 | 待补 |
 | 开发工具 | Swift 6.4（命令行工具）；也装了 Xcode | 只需要运行 app，不需要开发工具 |
 | oMLX | 0.7.2，`/Applications/oMLX.app`，端口 8000，最多 8 个请求同时跑 | 待补 |
+| TensorFold | 1.2.2 native（Homebrew `ashhart/tensorfold`），端口 8080，最多 8 条流；实测见“引擎：TensorFold” | 待补 |
 
 副屏（2026-10-29 接到 MacBook Pro 上看到的）：
 
@@ -189,19 +190,86 @@ oMLX 适配器每次读数读 `/api/status` 和 `/admin/api/stats`（合计约 1
 
 **刻度上限。** 并发上限 8，和 Spark 版 TensorFold 的 8 条流一样，并发画面不用改。
 
+## 引擎：TensorFold
+
+2026-11-07 增补。接的是 TensorFold 1.2.2 native（Homebrew `ashhart/tensorfold`，Zig 二进制，Metal 后端）。统一读数的格式当初就是照 TensorFold 的 `/health` + `/metrics` 定的，所以这一路的适配器最薄：字段大多原样直取，没有流表状态机。实测用 `mlx-community/Qwen3.5-2B-MLX-4bit` 跑了空闲、短请求、流式、6,000 token 长预填充、缓存命中重放、3 并发、10 并发挤排队、客户端中断九种情况，实录在 `fixtures/tensorfold/`。
+
+### 能读到什么（2026-11-07 实测）
+
+| 接口 | 要不要 key | 给什么 |
+| --- | --- | --- |
+| `GET /health` | 不要（配了 key 也开放，但只回 `{"status":"ok"}`） | `model`、`model_ids`、`max_batch_size`（= 流上限）、`live.connections/waiting` 和两个实时速率、`version`、`backend`、`device`；用来认出 TensorFold |
+| `GET /metrics`、`/v1/metrics` | 配了 key 要（启动加 `--metrics-open` 可放开） | Prometheus 文本，统一读数的主要来源，见下表；各 family 在刮取时各自读数，不是一次原子快照 |
+| `GET /v1/load` | 同 `/metrics` | 调度台账一次读全（JSON）：`instance`、`running`、`waiting`、`requests_started`、`filling_prompt_tokens_left`、`waiting_prompt_tokens`、`tokens{prefill_compute,prefill_cache,decode}`、`busy_us.prefill` |
+| `GET /v1/models` | 配了 key 要 | 每个模型 `id`、`context_length`、`max_model_len`（上下文上限） |
+| `GET /stats` | 要 `--dashboard` | 上面几个数的 JSON 快照，备用 |
+
+metrics 家族（`tensorfold:` 前缀，vLLM 镜像名同值；引擎数不了的 family 不发布，**缺失一律按缺失走降级路**）：
+
+| 家族 | 给什么 |
+| --- | --- |
+| `requests_running`、`requests_waiting` | 在跑（预填充或解码）、排队 |
+| `generation_tokens_total`（实时）、`generation_tokens_running` | 输出累计、在跑流的输出 |
+| `prompt_tokens_total`、`prompt_tokens_cached_total`、`prefix_cache_hits_total`、`prefix_cache_queries_total` | 提示累计（**结束语义**，中断的请求不计）、缓存命中（后三个只有带 prompt cache 的引擎发布） |
+| `time_to_first_token_seconds`、`request_prefill_seconds`、`request_decode_seconds`、`request_latency_seconds`、`request_time_per_output_token_seconds` | 首字、预填充、解码、端到端、TPOT（都是结束才变，和采集器口径一致） |
+| `kv_cache_usage_ratio{pool=…}`、`kv_cache_usage_perc{stream=…}` | 每条活流的上下文占用，画上下文条用 |
+| `mtp_drafted_total`、`mtp_accepted_total` | 推测解码计数（结束语义；Qwen3.5-2B 不发布，GLM 发布；缺失就照 oMLX 不显示接受率） |
+| `client_disconnections_total`、`preemptions_total` | 客户端断开、被抢占（发生了才发布） |
+| `process_start_time_seconds`、`server_info{model,backend,version,instance}`、`lanes`、`device_memory_bytes{}`、`device_memory_peak_bytes`、`process_footprint_bytes` | 启动时刻、版本、流上限、内存 |
+| `requests_started_total`、`scheduler_tokens_total{mode}`、`prefill_busy_seconds_total`、`filling_prompt_tokens_left`、`waiting_prompt_tokens` | 到达数、预填充实时进度（聚合） |
+
+### 适配器
+
+每次读数读 `/health` + `/metrics`（空闲合计约 2 毫秒，和 oMLX 相当），需要预填充进度时加 `/v1/load`。**不带 `tfpanel`**（native 是 Zig 二进制，Spark 版的 Python 外挂机制不存在，每条流的提示长度和输出数拿不到），采集器永远走“没有明细”的降级路。
+
+**统一读数各字段：**
+
+| 字段 | TensorFold 怎么来 |
+| --- | --- |
+| `ok`、`backend` | 恒为真；`tensorfold` |
+| `requests_running`、`waiting` | 同名家族 |
+| `streams.decoding`、`.prefilling` | 没有明细，按聚合值推：`.prefilling` = `filling_prompt_tokens_left > 0` 算 1 否则 0；`.decoding` = `requests_running − .prefilling`（不小于 0）。读不到 `/v1/load` 时 `.prefilling` 按 0 |
+| `streams.max` | `/health` 的 `max_batch_size`；读不到按 8 |
+| `requests_total` | `request_latency_seconds_count`（正常结束的请求数；中断的不计） |
+| `prompt_tokens_total`、`cached_tokens_total` | `prompt_tokens_total`、`prompt_tokens_cached_total`（后者可能不发布，缺失按 0） |
+| `completion_tokens_total` | `generation_tokens_total`（实时） |
+| `prefill_seconds_total`、`decode_seconds_total` | `request_prefill_seconds_sum`、`request_decode_seconds_sum` |
+| `drafted_total`、`accepted_total` | `mtp_drafted_total`、`mtp_accepted_total`；不发布就缺失（采集器按“字段存在才生效”） |
+| `context_length` | `/v1/models` 的 `context_length`；读不到用 262,144 |
+| `tfpanel` | 不带 |
+| 新 `epoch` | `process_start_time_seconds` 取整到 10 秒 |
+| 新 `aborted_total` | `client_disconnections_total`；不发布按 0 |
+| 新 `completion_finished_total` | `generation_tokens_total − generation_tokens_running`（结束请求的输出；实测中断请求已生成的 token 计入 `generation_tokens_total` 但不计入完成数，正好落进“断开带走的用量”） |
+| 新 `usage_totals` | `{prompt: prompt_tokens_total, cached: prompt_tokens_cached_total, completion: completion_finished_total, requests: requests_total}`；中断请求的提示不计、已生成输出计入，和“断开带走的用量”的口径一致，不需要适配器再补 |
+| 新 `usage_by_model` | 无（一台服务器一个模型），不带 |
+| 新 `loading` | 永远没有。TensorFold 启动时一次加载，没有按需加载；`--idle-unload` 停机（`/v1/load` 的 `parked` 为 1）时 metrics 不再发布引擎数值，按读不到走离线路 |
+| `ttft_sum`、`ttft_count` | `time_to_first_token_seconds_sum`、`_count` |
+| `kv_usage` | `kv_cache_usage_ratio{pool=…}` 各 pool 的值列表 |
+
+**模型名。** `/health` 的 `model`。一台服务器一个模型，`model_ids` 是它加别名；没有“最近用过的模型”问题。前缀清理照用 oMLX 的规矩。
+
+**模型加载中。** 无此状态（无按需加载），`loading` 字段永远缺失，画面不会出现“模型加载中”。
+
+**中断（和 oMLX 的关键差异）。** Metal 版主动感知客户端断开：0.1 秒内 `client_disconnections_total` 加一、该流取消、`requests_running` 归零；断开前已生成的 token 计入 `generation_tokens_total`（实测 +222），提示不计入 `prompt_tokens_total`、请求不计入 `request_latency_seconds_count`。与 oMLX“解码中断开累计值完全不变”不同，这里断开的用量**自动**进累计值，采集器现有分支不用改。
+
+**部署注意（写进 README，面板不处理）。** 单机加载有 70% 内存的加载闸（GLM 家族用 `GLM_LOAD_LIMIT_GB` 环境变量调，报错会写明需要的值）；它背后是 macOS 的 `iogpu.wired_limit_mb`（默认约内存的 60–70%，重启后回落，报拒绝先查它）。面板要读到 metrics，服务要么不配 key，要么加 `--metrics-open`。
+
 ## 引擎的选择
 
-不再自动识别。设置窗口里有一个“引擎”下拉框，选哪个就按哪个的方式读；这一版下拉框里只有 **oMLX** 一项。
+不再自动识别。设置窗口里有一个“引擎”下拉框，选哪个就按哪个的方式读；这一版下拉框里有 **oMLX** 和 **TensorFold** 两项（2026-11-07 起）。
 
-- 每个引擎带自己的默认地址（oMLX 是 `127.0.0.1:8000`），可以手改。
-- 每次轮询照选的引擎读。读到了但不像这个引擎（oMLX：`/health` 不是带 `engine_pool` 的 JSON）→ 画面显示离线，菜单栏的引擎一项写“这个地址上不是 oMLX”。
-- `/api/status` 返回 401 → 画面显示“oMLX 需要 API key · 在设置里填写”，菜单栏的引擎一项也写这句。
+- 每个引擎带自己的默认地址（oMLX 是 `127.0.0.1:8000`，TensorFold 是 `127.0.0.1:8080`），可以手改。
+- 每次轮询照选的引擎读。读到了但不像这个引擎 → 画面显示离线，菜单栏的引擎一项写“这个地址上不是 ×××”：
+  - oMLX：`/health` 不是带 `engine_pool` 的 JSON；
+  - TensorFold：`/health` 是 200 且是 JSON 对象、但带 `version` 和 `backend` 字段才算认出；配了 key 时 `/health` 只回 `{"status":"ok"}`，这时改用 `/metrics` 试探（200 = 是 TensorFold，401 = 需要 key，其他 = 不是）。
+- key：oMLX 的 key 自动从 `~/.omlx/settings.json` 读；TensorFold 默认不设 key，自动模式不读任何文件，手动填了才带 `Authorization: Bearer`。
+- 401 → 画面显示“××× 需要 API key · 在设置里填写”（文案带当前引擎名），菜单栏的引擎一项也写这句。
 - 连续 3 次读不到 → 离线，和 Spark 版一样；适配器的状态清空，重新连上后从头记。
 - 换引擎或改地址：立刻生效，相当于引擎重启（今日用量不受影响，账本按引擎启动标记接着算）。
 
 **以后接新引擎。** 各家的 OpenAI 兼容接口只管收发对话，不报告“正在跑几条、算到哪了”，所以做不出一个通用适配器——每家的状态接口都不一样（oMLX 有 `/admin/api/stats`，vLLM 有 Prometheus `/metrics`，有的什么都没有）。能做到的是把引擎相关的部分压到最小：一个新引擎 = 下拉框里多一项（名字、默认地址、要不要 key）+ 一个把它的状态接口转成统一读数的适配器，采集器以后的部分一行不改。
 
-- **TensorFold**：等它稳定了再接。第 1 版的 Mac 外挂（git 提交 `6c9ad9a` 的 `collector/`）可以拿来参考，但挂载点要对照那时的新版重新核实。
+- **TensorFold**：已接（2026-11-07，见“引擎：TensorFold”）。
 - **vLLM**：Spark 版的适配器（`panel/engine.py`）可以照着翻。
 - 只有收发接口、没有状态接口的引擎（例如 LM Studio、Ollama）只能在中间加一层代理来看到请求，到时候单独设计。
 
@@ -327,6 +395,8 @@ fixtures/
 | oMLX 升级改了 `/admin/api/stats` 的字段 | 读不到进度 | 字段缺了按“没有明细”走降级路，不崩；菜单栏写出 oMLX 版本，方便对照 |
 | oMLX 每块才更新一次进度 | 预填充进度一跳一跳（单独跑时约 1～2 秒一跳） | 动画在两次更新之间按 `speed` 往前推，到下一块的位置为止，不超过 |
 | 预填充中断开的请求，oMLX 照样算完 | 副屏上显示成正常请求，今日用量也算进去 | 这是 oMLX 的真实行为，如实显示 |
+| TensorFold 升级改了 metrics 家族名 | 读数缺字段 | 它的原则是“数不了的 family 不发布”，适配器把缺失一律按缺失走降级路，不崩；菜单栏写出 `server_info` 的 version 方便对照 |
+| TensorFold native 没有每流明细（Spark 版的 Python 外挂机制不存在） | 逐流的预填充进度、输出分布显示不了 | 永远走“没有明细”降级路；预填充有 `filling_prompt_tokens_left` 聚合进度，上下文条用每流 KV 占用画 |
 | 多条流并发时，同一次读数里有几行消失、累计请求数只加了一部分 | 哪几条算断开可能猜错 | 只影响断开次数和用量里的少量 token；在跑数回到 0 时流表清空 |
 | 几个模型的请求同时结束 | 分到各模型名下的用量可能有少量偏差 | 按提示长度比例分；合计始终是对的 |
 | ad-hoc 签名的 app 换了机器 | 第一次打开可能被拦 | 用 `scp`/`rsync` 拷，不走隔空投送；被拦就在“隐私与安全性”里放行一次 |
@@ -348,6 +418,7 @@ fixtures/
 9. 勾上“登录时启动”，注销再登录后自动运行；取消后不再自动运行。
 10. 菜单栏“副屏截图”：接副屏时点一下，`~/Library/Logs/TFPanel/` 里多一张 PNG，内容和副屏显示一致（真实像素），Finder 自动定位到文件；没接副屏时菜单项置灰。
 11. 副屏程序 CPU 占用：空闲时平均低于 1%，解码中低于 5%（活动监视器看）。
+12. 设置里切到 TensorFold（本机起一个测试实例即可）：空闲、解码、10 条并发挤排队时副屏画面正常；用 `fixtures/tensorfold/` 的实录回放，适配器输出的统一读数逐字段核对；杀掉一条在跑的请求，副屏和今日用量按“断开带走的用量”处理。
 
 ## 已定事项
 
@@ -359,3 +430,5 @@ fixtures/
 - Spark 那套代码（`panel/`、`hook/`、`scripts/`、Spark 的两份文档）等 Mac 版在 Studio 上验收通过后，用一个单独的提交删掉（2026-10-29）。
 - 菜单栏加“副屏截图”调试项：截副屏真实显示（不是重画），PNG 存 `~/Library/Logs/TFPanel/` 并在 Finder 定位；用弃用的 `CGDisplayCreateImage`，实测 macOS 26 不需要截屏权限、能截到面板窗口（2026-11-01）。
 - 持续动画的帧率默认改成 60（原 10，2026-11-01）。为了到 60fps 也不多费 CPU：绘制拆成静态层 + 动态层两幅画（见“整体架构”），动态层只重画每帧真在变的那几个元素；切换画面的淡入仍固定 30 帧。预期稳定解码时 CPU 和 10 帧时持平（约 5% 单核，实现后实测核对）。
+- 接入 TensorFold 1.2.2 native：下拉框多一项（默认地址 8080），适配器把 `/metrics` + `/health` 直取成统一读数（没有流表状态机，永远走降级路），采集器、账本、画面一行不改；实测结论和字段对照见“引擎：TensorFold”，实录在 `fixtures/tensorfold/`（2026-11-07）。
+- TensorFold 的 key 处理与 oMLX 不同：默认无 key，自动模式不读文件；`EngineIssue` 的提示文案（“不是这个引擎”“需要 key”）按当前所选引擎给（2026-11-07）。
