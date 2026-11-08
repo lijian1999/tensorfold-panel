@@ -59,14 +59,29 @@ public final class UsageLedger: UsageSink {
         let epoch: JSON? = (epochJSON?.number != nil) ? epochJSON : nil
         let epochChanged = Self.epochChanged(epoch, lastEpoch)
         var delta: [String: Int]?
-        var wholeAsDelta = false   // 这次是不是“整个算增量”（第一次以外的重启、标记变了）
+        var wholeAsDelta = false    // 这次是不是“整个算增量”（第一次以外的重启、标记变了）
+        var baselineChanged = false // 累计值变小或启动标记变了：基线换了
         if let last = lastTotals {
             if epochChanged {
-                delta = whole(totals)   // 引擎重启或换了引擎：整个算增量
-                wholeAsDelta = true
+                baselineChanged = true
+                // 启动时刻在今天：整份累计值都是今天产生的，算进今天。
+                // 启动时刻在今天以前（副屏重启后才接上旧引擎）：整份累计值含前几天的用量，
+                // 不能算进今天，只当作新基线。
+                if startedToday(epoch) {
+                    delta = whole(totals)
+                    wholeAsDelta = true
+                } else {
+                    delta = zeroDelta()
+                }
             } else if SOURCE_KEYS.contains(where: { totals[$0]!.int! < last[$0]! }) {
-                delta = whole(totals)   // 模型重启过：整个算增量
-                wholeAsDelta = true
+                baselineChanged = true
+                // 同上：没有今天的启动时刻就分不清这份累计值里有多少是今天的。
+                if startedToday(epoch) {
+                    delta = whole(totals)
+                    wholeAsDelta = true
+                } else {
+                    delta = zeroDelta()
+                }
             } else {
                 delta = Dictionary(uniqueKeysWithValues: SOURCE_KEYS.map { ($0, totals[$0]!.int! - last[$0]!) })
             }
@@ -82,7 +97,7 @@ public final class UsageLedger: UsageSink {
         lastTotals = whole(totals)
         lastByModel = byM
         lastEpoch = epoch
-        if delta == nil || epochChanged || delta!.values.contains(where: { $0 != 0 }) {
+        if delta == nil || baselineChanged || delta!.values.contains(where: { $0 != 0 }) {
             pending = true
         }
         maybeWrite(now)
@@ -147,6 +162,17 @@ public final class UsageLedger: UsageSink {
 
     private func whole(_ totals: JSON) -> [String: Int] {
         Dictionary(uniqueKeysWithValues: SOURCE_KEYS.map { ($0, totals[$0]!.int!) })
+    }
+
+    private func zeroDelta() -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: SOURCE_KEYS.map { ($0, 0) })
+    }
+
+    /// 引擎启动时刻（epoch，Unix 秒）是不是落在账本时区的“今天”。
+    /// 取不到启动时刻时算不是今天：这时整份累计值可能跨天，不能算进今天。
+    private func startedToday(_ epoch: JSON?) -> Bool {
+        guard let e = epoch?.number else { return false }
+        return dateStr(e) == date
     }
 
     /// 解析按模型的累计值：`{模型名: {四个键: 整数}}`；每个值都是对象、四个键都是整数才算有，否则 nil。

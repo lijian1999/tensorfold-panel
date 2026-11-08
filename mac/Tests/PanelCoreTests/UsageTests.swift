@@ -27,6 +27,11 @@ private let MIDNIGHT = utc_ts(4, "07:00:10")
 // 太平洋时间 2026-10-03 23:00:00（和 UTC 的日期差一天，用来验时区）
 private let EVENING = utc_ts(4, "06:00:00")
 
+// 引擎启动时刻：太平洋时间 2026-10-03 01:00:00（今天）
+private let TODAY_EPOCH = utc_ts(3, "07:00:00") + 3600
+// 引擎启动时刻：太平洋时间 2026-10-01 00:00:00（几天前）
+private let OLD_EPOCH = utc_ts(1, "07:00:00")
+
 private let TOTALS: JSON = ["prompt": 1000, "cached": 400, "completion": 50, "requests": 3]
 private let BIGGER: JSON = ["prompt": 1500, "cached": 600, "completion": 80, "requests": 5]
 private let SMALLER: JSON = ["prompt": 120, "cached": 0, "completion": 30, "requests": 1]
@@ -153,16 +158,49 @@ private func mtime(_ path: String) -> Date {
 }
 
 @Suite struct TestModelRestart {
-    @Test func test_smaller_totals_counts_as_restart() {
-        // 累计值比上次小：模型重启过，这次的值整个算增量。
+    @Test func test_累计值变小且没有启动标记时只记基线() {
+        // 累计值比上次小：模型重启过。没有启动时刻就分不清这份累计值里有多少是今天的，
+        // 只当作新基线，不把整份算进今天（否则会把前几天的累计记到今天）。
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger()
         ledger.update(TOTALS)
         ledger.update(SMALLER)
-        #expect(four(ledger.today()) == (120, 0, 30, 1))
+        #expect(four(ledger.today()) == (0, 0, 0, 0))
         // 重启之后接着按差值记
         ledger.update(["prompt": 200, "cached": 10, "completion": 40, "requests": 2])
+        #expect(four(ledger.today()) == (80, 10, 10, 1))
+    }
+
+    @Test func test_引擎今天启动时累计值变小算整个() {
+        // 启动时刻在今天：整份累计值都是今天产生的，算进今天。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        ledger.update(plus(TOTALS, ["epoch": .double(TODAY_EPOCH)]))
+        ledger.update(plus(SMALLER, ["epoch": .double(TODAY_EPOCH)]))
+        #expect(four(ledger.today()) == (120, 0, 30, 1))
+        ledger.update(plus(["prompt": 200, "cached": 10, "completion": 40, "requests": 2],
+                           ["epoch": .double(TODAY_EPOCH)]))
         #expect(four(ledger.today()) == (200, 10, 40, 2))
+    }
+
+    @Test func test_隔天接上几天前启动的引擎时只记基线() {
+        // 文件里是昨天的账和一个旧引擎的大累计值；今天接上几天前就启动的引擎，累计值反而变小。
+        // 整份累计值含前几天的用量，不能记进今天。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        h.writeUsage("""
+        {"version": 2, "date": "2026-10-02", "prompt_tokens": 0, "cached_tokens": 0, \
+        "completion_tokens": 0, "requests": 0, \
+        "last_totals": {"prompt": 5000, "cached": 4000, "completion": 500, "requests": 50}, \
+        "last_epoch": \(OLD_EPOCH)}
+        """)
+        let ledger = h.ledger()
+        ledger.update(plus(SMALLER, ["epoch": .double(OLD_EPOCH)]))
+        #expect(ledger.today()["date"] == .string("2026-10-03"))
+        #expect(four(ledger.today()) == (0, 0, 0, 0))
+        // 新基线之后的增量照常记
+        ledger.update(plus(["prompt": 200, "cached": 10, "completion": 40, "requests": 2],
+                           ["epoch": .double(OLD_EPOCH)]))
+        #expect(four(ledger.today()) == (80, 10, 10, 1))
     }
 }
 
@@ -375,18 +413,19 @@ private func mtime(_ path: String) -> Date {
     @Test func test_标记变了算整个() {
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger()
-        ledger.update(plus(TOTALS, ["epoch": .double(1000.0)]))
-        ledger.update(plus(BIGGER, ["epoch": .double(2000.0)]))
+        ledger.update(plus(TOTALS, ["epoch": .double(TODAY_EPOCH)]))
+        ledger.update(plus(BIGGER, ["epoch": .double(TODAY_EPOCH + 1800)]))
         #expect(four(ledger.today()) == (1500, 600, 80, 5),
-                "换了引擎或重启了：这次的累计值整个算增量")
+                "换了引擎或重启了，且启动时刻在今天：这次的累计值整个算增量")
     }
 
-    @Test func test_有标记变没标记算整个() {
+    @Test func test_有标记变没标记只记基线() {
+        // 新引擎没有启动时刻：分不清整份累计值里有多少是今天的，只当新基线。
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger()
-        ledger.update(plus(TOTALS, ["epoch": .double(1000.0)]))
+        ledger.update(plus(TOTALS, ["epoch": .double(TODAY_EPOCH)]))
         ledger.update(BIGGER)
-        #expect(four(ledger.today()) == (1500, 600, 80, 5))
+        #expect(four(ledger.today()) == (0, 0, 0, 0))
         ledger.flush()
         #expect(h.readUsage()["last_epoch"] == nil, "没有标记就不写这个键")
     }
@@ -395,7 +434,7 @@ private func mtime(_ path: String) -> Date {
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger()
         ledger.update(TOTALS)
-        ledger.update(plus(BIGGER, ["epoch": .double(1000.0)]))
+        ledger.update(plus(BIGGER, ["epoch": .double(TODAY_EPOCH)]))
         #expect(four(ledger.today()) == (1500, 600, 80, 5))
     }
 
@@ -591,11 +630,23 @@ private func mtime(_ path: String) -> Date {
         // oMLX 的启动时刻是算出来的，重启后差一两秒：30 秒以内不算换引擎。
         let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
         let ledger = h.ledger()
-        ledger.update(plus(TOTALS, ["epoch": .double(1000.0)]))   // 第一次：只记基线
-        ledger.update(plus(BIGGER, ["epoch": .double(1001.0)]))   // 差 1 秒：按差值记
+        ledger.update(plus(TOTALS, ["epoch": .double(TODAY_EPOCH)]))   // 第一次：只记基线
+        ledger.update(plus(BIGGER, ["epoch": .double(TODAY_EPOCH + 1)]))   // 差 1 秒：按差值记
         #expect(four(ledger.today()) == (500, 200, 30, 2))
         let r3: JSON = ["prompt": 1600, "cached": 700, "completion": 90, "requests": 6]
-        ledger.update(plus(r3, ["epoch": .double(1100.0)]))       // 差 99 秒：整个算
+        ledger.update(plus(r3, ["epoch": .double(TODAY_EPOCH + 99)]))       // 差 99 秒，仍在今天：整个算
         #expect(four(ledger.today()) == (500 + 1600, 200 + 700, 30 + 90, 2 + 6))
+    }
+
+    @Test func test_启动标记变了但引擎昨天启动时只记基线() {
+        // 换了引擎，但新引擎的启动时刻不在今天：整份累计值含前几天的用量，只当新基线。
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger()
+        ledger.update(plus(TOTALS, ["epoch": .double(OLD_EPOCH - 1800)]))
+        ledger.update(plus(BIGGER, ["epoch": .double(OLD_EPOCH)]))
+        #expect(four(ledger.today()) == (0, 0, 0, 0))
+        ledger.update(plus(["prompt": 1600, "cached": 700, "completion": 90, "requests": 6],
+                           ["epoch": .double(OLD_EPOCH)]))
+        #expect(four(ledger.today()) == (100, 100, 10, 1))
     }
 }
