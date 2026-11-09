@@ -13,7 +13,7 @@
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange?style=flat-square)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey?style=flat-square)
 ![Python / GTK 4](https://img.shields.io/badge/Python%20%2F%20GTK%204-blue?style=flat-square)
-![测试](https://img.shields.io/badge/tests-318%20Swift%20%2B%20~250%20Python-brightgreen?style=flat-square)
+![测试](https://img.shields.io/badge/tests-318%20Swift%20%2B%20~290%20Python-brightgreen?style=flat-square)
 ![引擎](https://img.shields.io/badge/engines-oMLX%20%7C%20TensorFold%20%7C%20vLLM-9cf?style=flat-square)
 
 </div>
@@ -125,8 +125,17 @@ Mac 版是把约 2,900 行 Python 逻辑逐模块翻译成 Swift 的产物：`Pa
 ## 验证
 
 - **318 条 Swift 测试**（swift-testing，`swift test` 全过）：Python 测试逐条翻译、断言不改，`fixtures/` 里的指标快照两边共用，视图模型输出逐字段对照。
-- **Python 版**约 250 条 unittest（采集、适配、记账、视图模型、绘制），在 Spark 上跑。
+- **Python 版**约 290 条 unittest（采集、适配、记账、视图模型、绘制），在 Spark 上跑。
 - **端到端实测**在 Mac Studio（256 GB）上完成 14 个场景，覆盖双引擎切换、10 并发、客户端中断、断连重连、单实例守卫，附 12 张实拍与测试报告：[`docs/tensorfold-e2e/测试报告.md`](docs/tensorfold-e2e/测试报告.md)。
+
+## 技术栈
+
+| 层 | 用了什么 |
+| --- | --- |
+| Mac app | Swift 6 · AppKit + SwiftUI · Core Graphics / Core Text 手绘 · URLSession · SMAppService（登录项）· ad-hoc codesign |
+| Spark 版 | Python 3 · GTK 4 · cairo / Pango · unittest |
+| 数据源 | oMLX JSON 状态接口 · TensorFold Prometheus 文本 + `/v1/load` · vLLM Prometheus |
+| 工程 | swift-testing · fixture 驱动的快照比对 · Prometheus 文本解析 · Docker 构建期补丁 |
 
 ## 快速开始
 
