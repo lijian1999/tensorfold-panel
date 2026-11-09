@@ -155,7 +155,16 @@ scripts/sync.sh
 ~/tfpanel/scripts/tfpanel.sh start
 ```
 
-完整安装、开机启动、外挂、更新卸载见 [`docs/design.md`](docs/design.md)；vLLM 增补见 [`docs/design-vllm.md`](docs/design-vllm.md)。
+**Spark 版装机四步**（前三步必需，第四步只在 TensorFold 时需要）：
+
+| 步骤 | 在哪执行 | 命令 |
+| --- | --- | --- |
+| 同步代码 | MacBook Pro | `scripts/sync.sh` |
+| 启动副屏程序 | Spark | `~/tfpanel/scripts/tfpanel.sh start` |
+| 装开机启动项 | Spark | `~/tfpanel/scripts/install-autostart.sh` |
+| 装容器外挂（可选） | MacBook Pro → Spark | `scripts/hook.sh install`，再在 Spark 上 `PULL=0 ./start.sh restart` |
+
+日常用 `tfpanel.sh start|stop|restart|status`；配置在 `~/.config/tfpanel/config.json`，今日账本在 `~/.local/state/tfpanel/`，日志是 `tfpanel.log`。设计与部署细节见 [`docs/design.md`](docs/design.md)，vLLM 增补见 [`docs/design-vllm.md`](docs/design-vllm.md)。
 
 ## 目录
 
