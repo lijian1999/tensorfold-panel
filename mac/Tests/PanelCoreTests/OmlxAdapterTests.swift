@@ -40,9 +40,10 @@ private func w(_ rid: String, _ elapsed: Double, _ prompt: Int) -> JSON {
     return .object(d)
 }
 
-private func p(_ rid: String, _ processed: Int, _ prompt: Int, cached: Int = 0, elapsed: Double = 0.0) -> JSON {
+private func p(_ rid: String, _ processed: Int, _ prompt: Int, cached: Int = 0, elapsed: Double = 0.0,
+               total: Int? = nil) -> JSON {
     let d: [String: JSON] = ["request_id": .string(rid), "processed": .int(processed),
-                             "total": .int(prompt), "speed": .double(0.0),
+                             "total": .int(total ?? prompt), "speed": .double(0.0),
                              "elapsed": .double(elapsed), "prompt_tokens": .int(prompt),
                              "cached_tokens": .int(cached)]
     return .object(d)
@@ -132,6 +133,21 @@ private func g(_ rid: String, _ out: Int, _ elapsed: Double, _ prompt: Int) -> J
         let row3 = h3["tfpanel"]!["streams"]![0]!
         #expect(almostEqual(row3["ttft_s"]!.number!, 2.75))
         #expect(row3["cached"] == 0)
+    }
+
+    @Test func test_有缓存时进度按缓存加已算() {
+        _ = feed(0.0, status(), stats(model()))
+        // 带缓存的预填充：total 是还剩的新 token，processed 是其中已算的
+        let (h1, _) = feed(1.0, status(active: 1),
+                           stats(model(prefilling: [p("a", 8192, 33348, cached: 24576,
+                                                      elapsed: 0.1, total: 8772)])))!
+        let row1 = h1["tfpanel"]!["streams"]![0]!
+        #expect(row1["filled"] == 32768)   // 24576 + 8192
+        let (h2, _) = feed(1.5, status(active: 1),
+                           stats(model(prefilling: [p("a", 8770, 33348, cached: 24576,
+                                                      elapsed: 0.5, total: 8772)])))!
+        let row2 = h2["tfpanel"]!["streams"]![0]!
+        #expect(row2["filled"] == 33346)   // 24576 + 8770
     }
 
     @Test func test_排队的行按已等待秒数回推开始时刻且不进tfpanel() {

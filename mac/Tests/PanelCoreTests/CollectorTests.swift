@@ -734,6 +734,17 @@ private func scene1_steps() -> [(Double, JSON)] {
         #expect(scene.snap_at(12.7)["context_used"] == .int(24615), "上下文占用取占用最大的那条流")
     }
 
+    @Test func test_只有一个进度点且已等待时先给平均速度() {
+        let scene = Scene(Collector(config: Config()))
+        scene.at(1.0, health(BASE))
+        let row: JSON = ["id": 1, "phase": "prefill", "prompt": 20000, "cached": 0,
+                         "filled": 2048, "start": 1.0]
+        let snap = scene.at(10.0, health(BASE, running: 1, pre: 1, hook: hook_rows(row)))
+        let prefill = snap["prefill"]!
+        #expect(almostEqual(num(prefill["tps"]), 2048 / 9.0, places: 4), "从到达算起：2048 ÷ 9")
+        #expect(almostEqual(num(prefill["remaining_s"]), (20000 - 2048) / (2048 / 9.0), places: 4))
+    }
+
     @Test func test_两条预填充流取之和() {
         let scene = Scene(Collector(config: Config()))
         scene.at(1.0, health(BASE))

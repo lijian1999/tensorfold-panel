@@ -146,12 +146,14 @@ oMLX 适配器每次读数读 `/api/status` 和 `/admin/api/stats`（合计约 1
 | `phase` | 在 `prefilling` 里是 `prefill`，在 `generating` 里是 `decode`；`waiting` 里的行不进外挂行，只算进 `waiting` 个数 |
 | `prompt` | `prompt_tokens` |
 | `cached` | 预填充行的 `cached_tokens`；解码行沿用它在预填充时的值，没见过预填充就是 0（结束后的真实命中数从累计值的差得到） |
-| `filled` | 预填充行的 `processed`（不小于 `cached`）；解码行等于 `prompt` |
+| `filled` | 预填充行：`total` 是“剩余新 token”时（≈ `prompt − cached`）取 `cached + processed`；否则取 `max(cached, processed)`。decoding 行等于 `prompt` |
 | `output` | 解码行的 `generated_tokens`，预填充行为 0 |
 | `start` | 第一次见到这个请求时定下，以后不变：在 `waiting` 里见到 → 现在 − `elapsed_seconds`；否则如果有“行还没出来”的占位 → 取最早那个占位的开始时刻；否则如果第一次见到就在 `generating` 里（两次读数之间就预填充完了）→ 上次读数的时刻和开始解码的时刻（现在 − `elapsed_seconds`）的中点；否则 → 现在 − 已用秒数 |
 | `ttft_s` | 第一次在 `generating` 里见到时算：现在 − `elapsed_seconds` − `start`（误差在一次轮询以内） |
 
-**占位。** `active_requests` 比流表里预填充、解码的行数多出几个，就记几个“行还没出来”的占位，开始时刻是第一次多出来的那次读数。有占位时这次读数**不带 `tfpanel`**，采集器走降级路——和 vLLM 的“提示未知”同一个处理。占位最多存在约 1 秒，而短预填充阈值是 3 秒，所以画面上看不出来。
+**进度点与速度。** oMLX 每算完一个预填充块才更新一次 `prefilling` 行（本机 0.7.4、该模型 8192 token 一块，首个更新可能晚到几十秒）。采集器按 `filled` 的增量算块间实测速度；只有一个进度点时，先按 `(filled − cached) ÷ (现在 − start)`（从到达算起的新 token 平均速度）给一个值，下一块到了再换实测，避免一整段只有 `—`。行出现前的空白期只能显示“已用时”，那是引擎还没发布数据。
+
+**占位。** `active_requests` 比流表里预填充、解码的行数多出几个，就记几个“行还没出来”的占位，开始时刻是第一次多出来的那次读数。有占位时这次读数**不带 `tfpanel`**，采集器走降级路——和 vLLM 的“提示未知”同一个处理。占位一直存在到第一块算完；2048 token 一块时约 1 秒，8192 的大块且吞吐低时可到几十秒。
 
 **结束和断开。** 一行从三张表里消失：
 

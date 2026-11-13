@@ -602,6 +602,13 @@ public final class Collector {
             if points.count >= 2 && points[points.count - 1].0 > points[0].0 {
                 let speed = (points[points.count - 1].1 - points[0].1) / (points[points.count - 1].0 - points[0].0)
                 Self._upsert(&speeds, sid, speed)
+            } else if points.count == 1, row["phase"] == .string("prefill"), now > start {
+                // 只有第一个进度点（oMLX 每块才更新一次）：按“从到达算起的新 token 平均速度”先给一个值，
+                // 免得进度条出现时速度一直是“—”。下一块到了再换成块间实测值。
+                let fresh = points[0].1 - _number(row, "cached", 0)
+                if fresh > 0 {
+                    Self._upsert(&speeds, sid, fresh / (now - start))
+                }
             }
         }
         _stream = table

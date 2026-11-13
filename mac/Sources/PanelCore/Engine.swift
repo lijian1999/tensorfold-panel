@@ -326,8 +326,18 @@ public final class OmlxAdapter {
         }
         if table == "prefilling" {
             row.phase = "prefill"
-            row.cached = max(0, _int_or(r["cached_tokens"]))
-            row.filled = max(row.cached, _int_or(r["processed"]))
+            let prompt = max(0, row.prompt)
+            let cached = max(0, _int_or(r["cached_tokens"]))
+            let processed = max(0, _int_or(r["processed"]))
+            row.cached = cached
+            // oMLX 的 total 是“还要算的新 token”（有缓存时 ≈ prompt − cached），
+            // processed 是其中已算的；这时进度 = cached + processed。
+            // 没有缓存、或 total 就是 prompt 时，processed 已是全部已算量，取两者较大的。
+            if let total = r["total"]?.number, total > 0, total < Double(prompt), cached > 0 {
+                row.filled = min(prompt, cached + processed)
+            } else {
+                row.filled = max(cached, processed)
+            }
             row.output = 0
             if row.pstart == nil {
                 row.pstart = now - elapsed(table, r)
