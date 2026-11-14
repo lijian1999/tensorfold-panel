@@ -126,7 +126,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             zoneSubmenu.addItem(it)
         }
 
-        priceRow.title = priceMenuTitle(currentModel: controller.currentModel, prices: s.prices)
+        priceRow.title = priceMenuTitle(currentModel: controller.currentModel, prices: s.prices, currency: s.currency)
         autoSwitchRow.state = s.autoSwitchMode ? .on : .off
         loginRow.state = LoginItem.enabled ? .on : .off
         loginRow.isEnabled = LoginItem.available

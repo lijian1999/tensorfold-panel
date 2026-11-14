@@ -29,4 +29,16 @@ import Testing
         #expect(priceMenuTitle(currentModel: nil, prices: prices) == "费用单价…")
         #expect(priceMenuTitle(currentModel: "", prices: prices) == "费用单价…")
     }
+    @Test func test_官方价目也算填了() {
+        // DeepSeek Flash 没填用户价，但内置官方价目算已填
+        #expect(priceMenuTitle(currentModel: "deepseek-flash", prices: [:], currency: "¥")
+            == "费用单价…")
+    }
+
+    @Test func test_别名也算填了() {
+        let prices: [String: ModelPrice] = ["A": ModelPrice(input: 1, cached: 0.02, output: 4,
+                                                              aliases: ["B"])]
+        #expect(priceMenuTitle(currentModel: "B", prices: prices) == "费用单价…")
+    }
+
 }

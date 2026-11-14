@@ -650,3 +650,159 @@ private func mtime(_ path: String) -> Date {
         #expect(four(ledger.today()) == (100, 100, 10, 1))
     }
 }
+
+
+/// 2026-11 month day hour:minute:second（北京时间）→ 时间戳。分时测试用。
+private func bj_ts(_ month: Int, _ day: Int, _ hour: Int, _ minute: Int = 0, _ second: Int = 0) -> Double {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    var comps = DateComponents()
+    comps.year = 2026; comps.month = month; comps.day = day
+    comps.hour = hour; comps.minute = minute; comps.second = second
+    return Double(cal.date(from: comps)!.timeIntervalSince1970)
+}
+
+/// 2026-11-09（周一）13:00、14:00：同一北京日期、太平洋日期也相同（UTC 05:00、06:00）。
+private let OFFPEAK_TS = bj_ts(11, 9, 13, 0, 0)
+private let PEAK_TS = bj_ts(11, 9, 14, 0, 0)
+
+private func flashTotals(_ prompt: Int, _ cached: Int, _ completion: Int, _ requests: Int) -> JSON {
+    ["prompt": .int(prompt), "cached": .int(cached), "completion": .int(completion), "requests": .int(requests)]
+}
+
+private func flashBM(_ prompt: Int, _ cached: Int, _ completion: Int, _ requests: Int) -> JSON {
+    ["prompt": .int(prompt), "cached": .int(cached), "completion": .int(completion), "requests": .int(requests)]
+}
+
+@Suite struct TestPeakCost {
+    @Test func test_官方价按峰谷分开计() {
+        // deepseek-flash 没填用户价 → 内置官方价目（美元）。13:00 空闲，14:00 高峰。
+        var cfg = Config()
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        ledger.update(plus(flashTotals(0, 0, 0, 0),
+                           ["by_model": ["deepseek-flash": flashBM(0, 0, 0, 0)]]))
+        ledger.update(plus(flashTotals(1000, 400, 50, 1),
+                           ["by_model": ["deepseek-flash": flashBM(1000, 400, 50, 1)]]))
+        h.clock.ts = PEAK_TS
+        ledger.update(plus(flashTotals(2000, 800, 100, 2),
+                           ["by_model": ["deepseek-flash": flashBM(2000, 800, 100, 2)]]))
+        let miss = 1000.0 - 400.0
+        let offCost = miss * 0.15 + 400 * 0.003 + 50 * 0.60
+        let peakCost = miss * 0.30 + 400 * 0.006 + 50 * 1.20
+        let off = offCost / 1_000_000
+        let peak = peakCost / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, off + peak, places: 10))
+        #expect(ledger.today()["by_model"]?["deepseek-flash"]?["prompt_tokens"] == .int(2000),
+                "明细里的四项是全时段合计")
+    }
+
+    @Test func test_人民币切换后立刻按人人民币价重算() {
+        var cfg = Config()
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        ledger.update(plus(flashTotals(0, 0, 0, 0),
+                           ["by_model": ["deepseek-flash": flashBM(0, 0, 0, 0)]]))
+        ledger.update(plus(flashTotals(1000, 400, 50, 1),
+                           ["by_model": ["deepseek-flash": flashBM(1000, 400, 50, 1)]]))
+        h.clock.ts = PEAK_TS
+        ledger.update(plus(flashTotals(2000, 800, 100, 2),
+                           ["by_model": ["deepseek-flash": flashBM(2000, 800, 100, 2)]]))
+        var cny = cfg; cny.currency = "¥"
+        ledger.apply(config: cny)
+        let miss = 1000.0 - 400.0
+        let offCost = miss * 1 + 400 * 0.02 + 50 * 4
+        let peakCost = miss * 2 + 400 * 0.04 + 50 * 8
+        let off = offCost / 1_000_000
+        let peak = peakCost / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, off + peak, places: 10))
+    }
+
+    @Test func test_节假日按空闲价() {
+        // 2026-10-01（周四、国庆）10:00 全天空闲；10-08 同一时刻是高峰。
+        let cfg = Config()
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: bj_ts(10, 1, 10), config: cfg)
+        ledger.update(plus(flashTotals(0, 0, 0, 0),
+                           ["by_model": ["deepseek-flash": flashBM(0, 0, 0, 0)]]))
+        ledger.update(plus(flashTotals(1000, 400, 50, 1),
+                           ["by_model": ["deepseek-flash": flashBM(1000, 400, 50, 1)]]))
+        let off = ((600.0) * 0.15 + 400 * 0.003 + 50 * 0.60) / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, off, places: 10))
+    }
+
+    @Test func test_用户分时价与合计() {
+        // 用户自己填一组分时价：空闲 1 / 0.02 / 4，高峰 2 / 0.04 / 8；13:00 → 14:00 两段。
+        var cfg = Config()
+        cfg.prices["A"] = ModelPrice(input: 1, cached: 0.02, output: 4,
+                                      peakInput: 2, peakCached: 0.04, peakOutput: 8)
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0)]]))
+        ledger.update(plus(BIGGER, ["by_model": ["A": bm(500, 200, 30, 2)]]))
+        h.clock.ts = PEAK_TS
+        let third: JSON = ["prompt": .int(1700), "cached": .int(660),
+                           "completion": .int(95), "requests": .int(6),
+                           "by_model": ["A": bm(700, 260, 45, 3)]]
+        ledger.update(third)
+        // 空闲段：500 prompt / 200 cached / 30 out；高峰段：200 / 60 / 15
+        let offMiss = 500.0 - 200.0
+        let offCost = offMiss * 1 + 200 * 0.02 + 30 * 4
+        let peakMiss = 200.0 - 60.0
+        let peakCost = peakMiss * 2 + 60 * 0.04 + 15 * 8
+        let off = offCost / 1_000_000
+        let peak = peakCost / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, off + peak, places: 10))
+    }
+
+    @Test func test_没填高峰价时高峰用量按同一价() {
+        var cfg = Config()
+        cfg.prices["A"] = ModelPrice(input: 0.15, cached: 0.016, output: 0.47)
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        ledger.update(plus(TOTALS, ["by_model": ["A": bm(0, 0, 0, 0)]]))
+        ledger.update(plus(BIGGER, ["by_model": ["A": bm(500, 200, 30, 2)]]))
+        h.clock.ts = PEAK_TS
+        let third: JSON = ["prompt": .int(1700), "cached": .int(660),
+                           "completion": .int(95), "requests": .int(6),
+                           "by_model": ["A": bm(700, 260, 45, 3)]]
+        ledger.update(third)
+        let cost = ((700.0 - 260) * 0.15 + 260 * 0.016 + 45 * 0.47) / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, cost, places: 10))
+    }
+
+    @Test func test_用户价别名在账上生效() {
+        var cfg = Config()
+        cfg.prices["本地 Flash"] = ModelPrice(input: 0.15, cached: 0.003, output: 0.60,
+                                                aliases: ["deepseek-v4-flash"])
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let ledger = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        ledger.update(plus(flashTotals(0, 0, 0, 0),
+                           ["by_model": ["deepseek-v4-flash": flashBM(0, 0, 0, 0)]]))
+        ledger.update(plus(flashTotals(1000, 400, 50, 1),
+                           ["by_model": ["deepseek-v4-flash": flashBM(1000, 400, 50, 1)]]))
+        let cost = ((600.0) * 0.15 + 400 * 0.003 + 50 * 0.60) / 1_000_000
+        #expect(almostEqual(ledger.today()["cost"]!.double!, cost, places: 10))
+        #expect(ledger.today()["priced_models"] == .int(1), "别名匹配到用户价，不算没填")
+    }
+
+    @Test func test_峰谷计数存进文件和重启后接着用() {
+        let cfg = Config()
+        let h = Harness(); defer { try? FileManager.default.removeItem(atPath: h.dir) }
+        let first = h.ledger(ts: OFFPEAK_TS, config: cfg)
+        first.update(plus(flashTotals(0, 0, 0, 0),
+                          ["by_model": ["deepseek-flash": flashBM(0, 0, 0, 0)]]))
+        first.update(plus(flashTotals(1000, 400, 50, 1),
+                          ["by_model": ["deepseek-flash": flashBM(1000, 400, 50, 1)]]))
+        h.clock.ts = PEAK_TS
+        first.update(plus(flashTotals(2000, 800, 100, 2),
+                          ["by_model": ["deepseek-flash": flashBM(2000, 800, 100, 2)]]))
+        first.flush()
+        let saved = h.readUsage()
+        #expect(saved["peak_by_model"]?["deepseek-flash"]?["prompt_tokens"] == .int(1000))
+        #expect(saved["by_model"]?["deepseek-flash"]?["prompt_tokens"] == .int(2000))
+        let second = h.ledger(ts: PEAK_TS, config: cfg)
+        #expect(second.today()["cost"]!.double! > 0)
+        #expect(second.today()["by_model"]?["deepseek-flash"]?["completion_tokens"] == .int(100))
+    }
+}

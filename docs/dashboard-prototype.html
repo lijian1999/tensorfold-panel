@@ -454,8 +454,8 @@
         <li><b>空闲 = 今日统计</b>：今日费用（按各模型自己填的 API 单价折算，货币在费用页里选：美元 / 人民币）、今日输入、输出、请求数。按菜单里选的时区（跟随系统 / 北京时间 / 太平洋时间）0 点清零，圆圈下面写日期和时区名。一轮中间的空隙不切到今日统计，一轮结束后才切。</li>
         <li><b>上下文条</b>：显示占用最大的那条流。占到 80% 变琥珀色、95% 变红色。</li>
         <li><b>模型加载中（新）</b>：oMLX 按需加载模型，请求来了才加载、闲置久了会卸载。加载期间显示已用时，进度条按 oMLX 给的预计时间走（最多到 99%），请求在后面排着（“+1”）。</li>
-        <li><b>费用单价（新）</b>：每个模型一组，自己查了 API 价格在菜单栏的“费用单价…”里填，不带默认值。有的模型没填：主数字只算填了的，日期那行写“不含 n 个模型”；一个都没填：主数字是“—”，日期那行写“未填单价 · 在菜单栏里填”。</li>
-        <li><b>货币（新）</b>：费用页顶上选美元（默认）或人民币。单价按所选货币填；换货币只换符号和文字，数字不按汇率换算，已填的单价和历史都不动。空闲画面的标题写“今日费用 · 美元 / 人民币”，数字带 $ / ¥。</li>
+        <li><b>费用单价（新）</b>：每个模型一组；菜单栏“费用单价…”里可填平铺价，也可开“分时”填高峰/空闲两套价，还能写旧模型别名。DeepSeek Flash 没填用户价时自动按官方峰谷价目。有的模型没价：主数字只算有价的，日期那行写“不含 n 个模型”；一个都没价：主数字是“—”，日期那行写“未填单价 · 在菜单栏里填”。</li>
+        <li><b>货币（新）</b>：费用页顶上选美元（默认）或人民币。用户单价按所选货币填；DeepSeek Flash 的官方价目同时内置美元/人民币两组，换货币自动换一组。换货币只换符号和文字，用户填的数字不按汇率换算，已填的单价和历史都不动。空闲画面的标题写“今日费用 · 美元 / 人民币”，数字带 $ / ¥。</li>
         <li><b>引擎</b>：在设置里选，这一版只有 oMLX。空闲和离线时模型名后面标出引擎名。预填充速度和进度是 oMLX 实报的。</li>
         <li><b>副屏截图（调试，新）</b>：菜单栏新增一项，把副屏真实显示的内容截成 PNG（真实像素，不是重画）存到 <code>~/Library/Logs/TFPanel/</code> 并在 Finder 里定位，用于排查“画面数据对、屏幕显示不对”的问题；副屏未接时置灰。截屏用的是已弃用的 CG 老接口，实测 macOS 26 上不需要“屏幕录制”权限。</li>
         <li><b>数字</b>：速度、内存这些还是 Spark 版的实测值，Mac Studio 到了用实测值替换。</li>
@@ -514,7 +514,7 @@
             </div>
             <div class="mac-page" data-page="price">
               <div class="form-row"><label>货币</label><span class="seg" id="curSeg"></span></div>
-              <div class="form-note" id="curNote" style="margin-top:4px">美元 / 百万 token。自己查了 API 价格填；没填的模型不算进今日费用</div>
+              <div class="form-note" id="curNote" style="margin-top:4px">美元 / 百万 token。DeepSeek Flash 没填用户价时按官方峰谷价目；其它模型没填的不算进今日费用</div>
               <table class="price-table">
                 <thead><tr><th>模型</th><th>输入</th><th>缓存命中</th><th>输出</th></tr></thead>
                 <tbody id="priceRows"></tbody>
@@ -1487,7 +1487,7 @@
       ? '<b data-cur="usd">美元</b><span data-cur="cny">人民币</span>'
       : '<span data-cur="usd">美元</span><b data-cur="cny">人民币</b>';
     const note = document.getElementById('curNote');
-    if (note) note.textContent = `${CUR[S.cur].name} / 百万 token。自己查了 API 价格填；没填的模型不算进今日费用`;
+    if (note) note.textContent = `${CUR[S.cur].name} / 百万 token。DeepSeek Flash 没填用户价时按官方峰谷价目；其它模型没填的不算进今日费用`;
     const sel = document.getElementById('curSel');
     if (sel) sel.value = S.cur;
   }

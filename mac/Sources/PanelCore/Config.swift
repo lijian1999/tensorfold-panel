@@ -2,15 +2,34 @@
 import Foundation
 
 // 一个模型的 API 单价（所选货币 / 百万 token），由用户自己查了填。
+//
+// 默认只有一组价（各时段相同）；填了高峰三项就是分时计价：
+// input/cached/output 是空闲时段（也是平坦计价的全部时段）的价，
+// peakInput/peakCached/peakOutput 是高峰时段的价。aliases 是共用这一价的旧模型名。
 public struct ModelPrice: Equatable, Sendable, Codable {
-    public var input: Double     // 未命中的输入 token
-    public var cached: Double    // 缓存命中的输入 token
-    public var output: Double    // 输出 token
+    public var input: Double     // 未命中的输入 token（空闲 / 平坦）
+    public var cached: Double    // 缓存命中的输入 token（空闲 / 平坦）
+    public var output: Double    // 输出 token（空闲 / 平坦）
+    public var peakInput: Double?     // 高峰时段的未命中输入；nil = 不分时
+    public var peakCached: Double?    // 高峰时段的缓存命中输入
+    public var peakOutput: Double?    // 高峰时段的输出
+    public var aliases: [String]?     // 同样按这一价计费的旧模型名；nil = 没有
 
-    public init(input: Double, cached: Double, output: Double) {
+    public init(input: Double, cached: Double, output: Double,
+                peakInput: Double? = nil, peakCached: Double? = nil,
+                peakOutput: Double? = nil, aliases: [String]? = nil) {
         self.input = input
         self.cached = cached
         self.output = output
+        self.peakInput = peakInput
+        self.peakCached = peakCached
+        self.peakOutput = peakOutput
+        self.aliases = aliases
+    }
+
+    /// 三项高峰价都填了才算分时计价；只填一部分仍按平坦计，避免把缺项当成 0。
+    public var hasPeak: Bool {
+        peakInput != nil && peakCached != nil && peakOutput != nil
     }
 }
 

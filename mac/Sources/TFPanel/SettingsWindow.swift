@@ -6,13 +6,20 @@ import SwiftUI
 
 enum SettingsPage: String, CaseIterable { case engine, price, screen }
 
-/// 费用表一行的编辑状态（单价表行 + 三个输入框的文字 + 是否填错）。
+/// 费用表一行的编辑状态（单价表的行 + 六个输入框 + 别名框 + 是否填错）。
 struct PriceRowVM: Identifiable, Equatable {
     let model: String
     var present: Bool
-    var input: String
-    var cached: String
-    var output: String
+    var official: Bool             // 没填用户价，正在按内置 DeepSeek 官方价目算
+    var tiered: Bool              // 分时计价：高峰三项也参与
+    var input: String             // 空闲/平坦的未命中输入
+    var cached: String            // 空闲/平坦的缓存命中输入
+    var output: String            // 空闲/平坦的输出
+    var peakInput: String
+    var peakCached: String
+    var peakOutput: String
+    var aliases: String
+    var dirty: Bool                // 这一行被改过、还没写进设置
     var invalid: Bool
 
     var id: String { model }
@@ -49,7 +56,7 @@ final class SettingsModel: ObservableObject {
         rebuildRows(keeping: [])
     }
 
-    /// 打开窗口时从设置重新取各输入框的文字（保留已有的行编辑内容）。
+    /// 打开窗口时从设置重新取各输入框的文字（保留还没提交的行编辑）。
     func reload() {
         let s = controller.settings
         engineChoice = s.engine == "tensorfold" ? "tensorfold" : "omlx"
@@ -68,35 +75,62 @@ final class SettingsModel: ObservableObject {
         rebuildRows(keeping: rows)
     }
 
-    /// 按当前模型列表 + knownModels + 已填单价重排行；keeping 里同名模型保留已输入的文字。
-    private func rebuildRows(keeping: [PriceRowVM]) {
+    /// 按当前模型列表 + knownModels + 已填单价重排行；
+    /// keeping 里同名行没改过就按设置重建（official 行会跟着货币刷新），改过的原样保留。
+    private func rebuildRows(keeping: [PriceRowVM], refreshOfficial: Bool = false) {
         var edits: [String: PriceRowVM] = [:]
         for r in keeping { edits[r.model] = r }
         rows = priceRows(current: controller.modelIDs,
                          known: controller.settings.knownModels,
                          prices: controller.settings.prices).map { row in
-            if var e = edits[row.model] {
+            if var e = edits[row.model], e.dirty || (!refreshOfficial && !e.official) {
                 e.present = row.present
                 return e
             }
-            func text(_ keyPath: KeyPath<ModelPrice, Double>) -> String {
-                guard let p = row.price else { return "" }
-                return priceText(p[keyPath: keyPath])
+            let match = priceForUse(model: row.model,
+                                     prices: controller.settings.prices,
+                                     currency: controller.settings.currency)
+            func text(_ value: Double?) -> String {
+                guard let v = value else { return "" }
+                return priceText(v)
             }
+            func field(_ keyPath: KeyPath<ModelPrice, Double?>) -> String {
+                text(match?.price[keyPath: keyPath])
+            }
+            let p = match?.price
             return PriceRowVM(model: row.model, present: row.present,
-                              input: text(\.input), cached: text(\.cached), output: text(\.output),
-                              invalid: false)
+                              official: match?.official ?? false,
+                              tiered: p?.hasPeak ?? false,
+                              input: text(p?.input), cached: text(p?.cached), output: text(p?.output),
+                              peakInput: field(\.peakInput), peakCached: field(\.peakCached),
+                              peakOutput: field(\.peakOutput),
+                              aliases: (p?.aliases ?? []).joined(separator: ", "),
+                              dirty: false, invalid: false)
         }
     }
 
-    /// 三个单价输入框的绑定（改动先只留在界面上，按回车或关窗时生效）。
+    /// 行里某个文字框的绑定（改动先只留在界面上，按回车或关窗时生效）。
     func text(_ model: String, _ keyPath: WritableKeyPath<PriceRowVM, String>) -> Binding<String> {
         Binding(
             get: { self.rows.first { $0.model == model }?[keyPath: keyPath] ?? "" },
             set: { v in
                 guard let i = self.rows.firstIndex(where: { $0.model == model }) else { return }
                 self.rows[i][keyPath: keyPath] = v
-                self.rows[i].invalid = false   // 重新编辑时先撤掉红字
+                self.rows[i].invalid = false
+                self.rows[i].dirty = true
+            }
+        )
+    }
+
+    /// “分时”开关的绑定：改动先只留在界面上，按回车或关窗时生效。
+    func tiered(_ model: String) -> Binding<Bool> {
+        Binding(
+            get: { self.rows.first { $0.model == model }?.tiered ?? false },
+            set: { v in
+                guard let i = self.rows.firstIndex(where: { $0.model == model }) else { return }
+                self.rows[i].tiered = v
+                self.rows[i].invalid = false
+                self.rows[i].dirty = true
             }
         )
     }
@@ -117,16 +151,25 @@ final class SettingsModel: ObservableObject {
         controller.settingsChanged()
     }
 
-    /// 换货币：只换符号和文字，数字不按汇率换算；立刻生效
+    /// 换货币：只换符号和文字，数字不按汇率换算；官方价目自动换成所选货币的那一组。
+    /// 没改过的行按新货币重建，改过但还没提交的行原样保留。
     func applyCurrency(_ symbol: String) {
         currencyText = symbol
         controller.settings.currency = symbol
+        rebuildRows(keeping: rows, refreshOfficial: true)
         controller.settingsChanged()
     }
 
     /// 费用页的说明文字，跟着货币走
     var currencyNote: String {
-        currencyName(currencyText) + " / 百万 token。自己查了 API 价格填；没填的模型不算进今日费用"
+        currencyName(currencyText)
+            + " / 百万 token。DeepSeek Flash 没填用户价时按官方峰谷价目；其它模型自己查了 API 价格填，没填的不算进今日费用"
+    }
+
+    /// 峰谷与别名的说明
+    var peakNote: String {
+        "分时：高峰按北京时间周一至周五 9:00–12:00、14:00–18:00；周末和中国法定节假日全天空闲。"
+            + "旧模型名写在“别名”里，共用这一组价"
     }
 
     func forget(_ model: String) {
@@ -137,17 +180,21 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - 输入框生效（按回车、关窗时）
 
-    /// 一行的三个框按 parsePrice 的结果生效：valid 写入；empty 删掉；invalid 不写、标红。
+    /// 一行按 parseEditedPrice 的结果生效：valid 写入；empty 删掉用户价（官方价仍适用）；
+    /// invalid 不写、标红。生效后按设置重画这一行，免得界面上仍挂着没保存的值。
     func commitRow(_ model: String) {
         guard let i = rows.firstIndex(where: { $0.model == model }) else { return }
         let r = rows[i]
-        switch parsePrice(input: r.input, cached: r.cached, output: r.output) {
+        switch parseEditedPrice(input: r.input, cached: r.cached, output: r.output,
+                                 peakInput: r.peakInput, peakCached: r.peakCached,
+                                 peakOutput: r.peakOutput, tiered: r.tiered,
+                                 aliases: r.aliases) {
         case .valid(let p):
             controller.settings.prices[model] = p
-            rows[i].invalid = false
+            rebuildRows(keeping: rows.filter { $0.model != model })
         case .empty:
             controller.settings.prices.removeValue(forKey: model)
-            rows[i].invalid = false
+            rebuildRows(keeping: rows.filter { $0.model != model })
         case .invalid:
             rows[i].invalid = true
         }
@@ -171,7 +218,8 @@ final class SettingsModel: ObservableObject {
         controller.settingsChanged()
     }
 
-    /// 关窗时把所有输入框写进设置，settingsChanged() 调一次。
+    /// 关窗时把改动过的行写进设置，settingsChanged() 调一次。
+    /// 没改过的行不写：否则官方价目会被当成用户价存下来，换货币时就不跟着换了。
     func commitAll() {
         let s = controller.settings
         let addr = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -180,8 +228,11 @@ final class SettingsModel: ObservableObject {
         let name = screenNameText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty { s.screenName = name }
         var prices = s.prices
-        for (i, r) in rows.enumerated() {
-            switch parsePrice(input: r.input, cached: r.cached, output: r.output) {
+        for (i, r) in rows.enumerated() where r.dirty {
+            switch parseEditedPrice(input: r.input, cached: r.cached, output: r.output,
+                                     peakInput: r.peakInput, peakCached: r.peakCached,
+                                     peakOutput: r.peakOutput, tiered: r.tiered,
+                                     aliases: r.aliases) {
             case .valid(let p):
                 prices[r.model] = p
                 rows[i].invalid = false
@@ -217,7 +268,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         if let existing = window {
             win = existing
         } else {
-            win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 320),
+            win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
                            styleMask: [.titled, .closable],   // 可关闭，不可缩放
                            backing: .buffered, defer: false)
             win.title = "设置"
@@ -231,7 +282,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
     }
 
-    /// 关闭窗口时把各输入框写进设置。
+    /// 关闭窗口时把改动过的行和各输入框写进设置。
     func windowWillClose(_ notification: Notification) {
         model.commitAll()
     }
@@ -259,7 +310,7 @@ private struct SettingsRootView: SwiftUI.View {
                 .tabItem { Text("副屏") }
                 .tag(SettingsPage.screen)
         }
-        .frame(width: 380)
+        .frame(width: 640, height: 500)
     }
 
     private var enginePage: some SwiftUI.View {
@@ -325,45 +376,85 @@ private struct SettingsRootView: SwiftUI.View {
                 }
             }
             note(model.currencyNote)
-            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
-                GridRow {
-                    Text("模型").font(.callout).foregroundColor(.secondary)
-                    Text("输入").font(.callout).foregroundColor(.secondary)
-                    Text("缓存命中").font(.callout).foregroundColor(.secondary)
-                    Text("输出").font(.callout).foregroundColor(.secondary)
-                    Text(" ")
-                }
-                Divider()
-                ForEach(model.rows) { row in
-                    GridRow {
-                        Text(row.model)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundColor(row.present ? .primary : .secondary)
-                        priceField(row.model, \.input)
-                        priceField(row.model, \.cached)
-                        priceField(row.model, \.output)
-                        if !row.present {
-                            Button("删除") { model.forget(row.model) }
-                                .buttonStyle(.borderless)
-                                .font(.callout)
-                        } else {
-                            Text(" ")
-                        }
-                    }
-                    if row.invalid {
-                        GridRow {
-                            Text("三项都要填，填不小于 0 的数")
-                                .font(.callout)
-                                .foregroundColor(.red)
-                                .gridCellColumns(5)
-                        }
+            note(model.peakNote)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(model.rows) { row in
+                        priceCard(row)
+                        Divider()
                     }
                 }
             }
-            Spacer(minLength: 8)
         }
         .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// 一个模型的价目块：模型名 / 官方价目标记 / 分时开关 / 别名 / 六个价框。
+    @ViewBuilder
+    private func priceCard(_ row: PriceRowVM) -> some SwiftUI.View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(row.model)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundColor(row.present ? .primary : .secondary)
+                    .frame(maxWidth: 300, alignment: .leading)
+                if row.official {
+                    Text("官方价目")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+                Spacer(minLength: 4)
+                Toggle("分时", isOn: self.model.tiered(row.model))
+                    .toggleStyle(.switch)
+                    .font(.callout)
+                if !row.present {
+                    Button("删除") { self.model.forget(row.model) }
+                        .buttonStyle(.borderless)
+                        .font(.callout)
+                }
+            }
+            HStack(spacing: 6) {
+                Text("别名").font(.callout).foregroundColor(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                TextField("旧模型名，用逗号分隔", text: self.model.text(row.model, \.aliases))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 460)
+                    .onSubmit { self.model.commitRow(row.model) }
+            }
+            HStack(spacing: 6) {
+                Text(" ").frame(width: 44)
+                Text("输入").font(.callout).foregroundColor(.secondary).frame(width: 76, alignment: .leading)
+                Text("缓存命中").font(.callout).foregroundColor(.secondary).frame(width: 76, alignment: .leading)
+                Text("输出").font(.callout).foregroundColor(.secondary).frame(width: 76, alignment: .leading)
+            }
+            if row.tiered {
+                priceLine(row, label: "高峰", input: \.peakInput, cached: \.peakCached, output: \.peakOutput)
+                priceLine(row, label: "空闲", input: \.input, cached: \.cached, output: \.output)
+            } else {
+                priceLine(row, label: "单价", input: \.input, cached: \.cached, output: \.output)
+            }
+            if row.invalid {
+                Text(row.tiered ? "分时的六个格子都要填，填不小于 0 的数" : "三项都要填，填不小于 0 的数")
+                    .font(.callout)
+                    .foregroundColor(.red)
+                    .padding(.leading, 50)
+            }
+        }
+    }
+
+    private func priceLine(_ row: PriceRowVM, label: String,
+                           input: WritableKeyPath<PriceRowVM, String>,
+                           cached: WritableKeyPath<PriceRowVM, String>,
+                           output: WritableKeyPath<PriceRowVM, String>) -> some SwiftUI.View {
+        HStack(spacing: 6) {
+            Text(label).font(.callout).foregroundColor(.secondary)
+                .frame(width: 44, alignment: .leading)
+            priceField(row.model, input)
+            priceField(row.model, cached)
+            priceField(row.model, output)
+        }
     }
 
     private var screenPage: some SwiftUI.View {
@@ -381,7 +472,7 @@ private struct SettingsRootView: SwiftUI.View {
     private func priceField(_ model: String, _ keyPath: WritableKeyPath<PriceRowVM, String>) -> some SwiftUI.View {
         TextField("—", text: self.model.text(model, keyPath))
             .textFieldStyle(.roundedBorder)
-            .frame(width: 64)
+            .frame(width: 76)
             .onSubmit { self.model.commitRow(model) }
     }
 

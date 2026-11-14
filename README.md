@@ -13,7 +13,7 @@
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange?style=flat-square)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey?style=flat-square)
 ![Python / GTK 4](https://img.shields.io/badge/Python%20%2F%20GTK%204-blue?style=flat-square)
-![测试](https://img.shields.io/badge/tests-318%20Swift%20%2B%20~290%20Python-brightgreen?style=flat-square)
+![测试](https://img.shields.io/badge/tests-348%20Swift%20%2B%20~290%20Python-brightgreen?style=flat-square)
 ![引擎](https://img.shields.io/badge/engines-oMLX%20%7C%20TensorFold%20%7C%20vLLM-9cf?style=flat-square)
 
 </div>
@@ -34,7 +34,7 @@ TFPanel 把这块屏变成一台常驻仪表：窗口自动铺满副屏、不抢
 | **预填充** | 琥珀色圆弧、进度条（已算 / 总量）、缓存命中率、已等待与预计剩余 |
 | **流指示点** | 绿点 = 解码中，琥珀点 = 预填充中，灰点 = 空闲；有排队时追加「+2」 |
 | **上下文** | 每条流的 KV 占用条：80% 以下灰、80–95% 琥珀、95% 以上红 |
-| **今日账单** | 今日费用（按各模型自己的 API 单价折算）、输入 / 输出 token、缓存命中、请求数 |
+| **今日账单** | 今日费用（按各模型自己的 API 单价折算，支持高峰/空闲分时；DeepSeek Flash 自动用官方价目）、输入 / 输出 token、缓存命中、请求数 |
 | **引擎状态** | 模型名 + 引擎名、首字延迟、内存占用；断连 3 次后显示离线与上次模型 |
 
 <details>
@@ -116,7 +116,7 @@ Mac 版是把约 2,900 行 Python 逻辑逐模块翻译成 Swift 的产物：`Pa
 
 **1. 渲染分层，静止时完全不重画。** 背景、卡片、标题、刻度这些静态内容只在画面数据变化、淡入结束、屏幕缩放变化时整幅重画；仪表弧、流点、进度条、主数字走动态层，按动画帧率重画。画面静止时两层都停；验收指标是空闲 CPU 低于 1%、解码中低于 5%。
 
-**2. 记账按「累计值的差」而不是按事件。** 引擎重启会改变累计值，所以账本记录上一次读到的累计值作为基线；副屏程序没在跑的那段时间，重启后按基线把用量补上。今日用量按模型分开记，费用按各模型自己的单价算；时区可选跟随系统 / 北京时间 / 太平洋时间，「今日」按所选时区的 0 点切日，切换时区时账本跟着换日。
+**2. 记账按「累计值的差」而不是按事件，再按峰谷分桶。** 引擎重启会改变累计值，所以账本记录上一次读到的累计值作为基线；副屏程序没在跑的那段时间，重启后按基线把用量补上。今日用量按模型分开记，每个模型再分出高峰/空闲两份，费用按各自时段单价算；DeepSeek Flash 的官方价目（缓存命中、未命中、输出，高峰和空闲，美元/人民币）内置，旧模型名共用同一价。时区可选跟随系统 / 北京时间 / 太平洋时间，「今日」按所选时区的 0 点切日，切换时区时账本跟着换日；计费时段始终按北京时间的官方高峰表。
 
 **3. 中断请求也要算钱。** oMLX 解码中断开时累计值完全不变，适配器自己数断开次数并把已输出 token 记进「断开带走的用量」；TensorFold 会主动感知断开，已生成 token 自动进累计值；vLLM 则是断开不计完成数但 token 已计入。三种语义最后都落到同一本账上。
 
@@ -124,7 +124,7 @@ Mac 版是把约 2,900 行 Python 逻辑逐模块翻译成 Swift 的产物：`Pa
 
 ## 验证
 
-- **318 条 Swift 测试**（swift-testing，`swift test` 全过）：Python 测试逐条翻译、断言不改，`fixtures/` 里的指标快照两边共用，视图模型输出逐字段对照。
+- **348 条 Swift 测试**（swift-testing，`swift test` 全过）：Python 测试逐条翻译、断言不改，`fixtures/` 里的指标快照两边共用，视图模型输出逐字段对照；峰谷时段的边界、节假日、官方价目和分桶记账另有测试。
 - **Python 版**约 290 条 unittest（采集、适配、记账、视图模型、绘制），在 Spark 上跑。
 - **端到端实测**在 Mac Studio（256 GB）上完成 14 个场景，覆盖双引擎切换、10 并发、客户端中断、断连重连、单实例守卫，附 12 张实拍与测试报告：[`docs/tensorfold-e2e/测试报告.md`](docs/tensorfold-e2e/测试报告.md)。
 
@@ -146,7 +146,7 @@ mac/scripts/build-app.sh      # 产出 mac/dist/TFPanel.app
 open mac/dist/TFPanel.app     # 或拷到 /Applications 后双击
 ```
 
-菜单栏图标点开即可配置：引擎（oMLX / TensorFold）、地址、API key、时区、费用单价、自动切换 960×640、登录时启动。oMLX 的 key 默认自动读 `~/.omlx/settings.json`；TensorFold 要读 metrics 时启动加 `--metrics-open`，或在设置里手填 key。
+菜单栏图标点开即可配置：引擎（oMLX / TensorFold）、地址、API key、时区、费用单价（平铺或高峰/空闲分时，可带旧模型别名）、自动切换 960×640、登录时启动。oMLX 的 key 默认自动读 `~/.omlx/settings.json`；TensorFold 要读 metrics 时启动加 `--metrics-open`，或在设置里手填 key。
 
 **Spark 版**（在 MacBook Pro 上同步，在 Spark 上启动）：
 

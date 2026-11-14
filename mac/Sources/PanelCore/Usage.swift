@@ -23,7 +23,8 @@ public final class UsageLedger: UsageSink {
     private var zone: TimeZone
     private let saveIntervalS: Double
 
-    private var byModel: [String: [String: Int]]   // 模型名 → 四项（键同 COUNTERS）；今天的合计是各模型相加
+    private var byModel: [String: [String: Int]]   // 模型名 → 四项（键同 COUNTERS）；全时段合计
+    private var peakByModel: [String: [String: Int]] // 模型名 → 高峰时段四项，是 byModel 的子集
     private var lastTotals: [String: Int]?          // 上一次读到的四项合计；nil 表示还没有基线
     private var lastByModel: [String: [String: Int]]?  // 上一次读数里的 by_model（键同 SOURCE_KEYS）；nil 表示没有
     private var lastEpoch: JSON?                    // 上次读数的引擎启动标记（vLLM 才有）；nil 表示没有
@@ -39,6 +40,7 @@ public final class UsageLedger: UsageSink {
         self.zone = UsageLedger.makeZone(config.timezone)
         self.saveIntervalS = saveIntervalS
         self.byModel = [:]
+        self.peakByModel = [:]
         self.lastTotals = nil
         self.lastByModel = nil
         self.lastEpoch = nil
@@ -59,6 +61,7 @@ public final class UsageLedger: UsageSink {
         let epoch: JSON? = (epochJSON?.number != nil) ? epochJSON : nil
         let epochChanged = Self.epochChanged(epoch, lastEpoch)
         var delta: [String: Int]?
+        let period = pricePeriod(atUnix: now)   // 这次读数带来的增量记到当前时段
         var wholeAsDelta = false    // 这次是不是“整个算增量”（第一次以外的重启、标记变了）
         var baselineChanged = false // 累计值变小或启动标记变了：基线换了
         if let last = lastTotals {
@@ -92,7 +95,7 @@ public final class UsageLedger: UsageSink {
         let byM = Self.parseByModel(totals["by_model"], valueKeys: SOURCE_KEYS)
         let fallback = totals["model"]?.string ?? ""
         if let delta {
-            distribute(delta, byM: byM, whole: wholeAsDelta, fallback: fallback)
+            distribute(delta, byM: byM, whole: wholeAsDelta, fallback: fallback, period: period)
         }
         lastTotals = whole(totals)
         lastByModel = byM
@@ -191,12 +194,15 @@ public final class UsageLedger: UsageSink {
         return out
     }
 
-    /// 把合计的增量分到各模型名下，每一项（四个 SOURCE_KEYS）分别处理。
-    private func distribute(_ delta: [String: Int], byM: [String: [String: Int]]?, whole: Bool, fallback: String) {
+    /// 把合计的增量按模型、按时段分到账上，每一项（四个 SOURCE_KEYS）分别处理。
+    /// period 是这次读数时刻的峰谷；两次读数之间的增量就按这个时段计（轮询 0.5 秒，边界误差不超过一拍）。
+    private func distribute(_ delta: [String: Int], byM: [String: [String: Int]]?, whole: Bool,
+                            fallback: String, period: PricePeriod) {
+        let isPeak = period == .peak
         guard let byM else {
             // 没有按模型的累计值：整个增量记在当前模型名下
             for (counter, src) in zip(COUNTERS, SOURCE_KEYS) {
-                add(fallback, counter: counter, value: delta[src]!)
+                add(fallback, counter: counter, value: delta[src]!, peak: isPeak)
             }
             return
         }
@@ -214,23 +220,41 @@ public final class UsageLedger: UsageSink {
                 sum += v
             }
             if sum == delta[src]! {
-                for (m, v) in parts { add(m, counter: counter, value: v) }
+                for (m, v) in parts { add(m, counter: counter, value: v, peak: isPeak) }
             } else {
                 // 各模型加起来对不上合计：整个增量记在当前模型名下
-                add(fallback, counter: counter, value: delta[src]!)
+                add(fallback, counter: counter, value: delta[src]!, peak: isPeak)
             }
         }
     }
 
-    /// 记一笔：加到某模型的四项上；增量为 0 时不新建模型条目（今天的账里只出现真有用量的模型）。
-    private func add(_ model: String, counter: String, value: Int) {
-        if value == 0 && byModel[model] == nil { return }
-        var entry = byModel[model] ?? UsageLedger.zeroCounters()
+    /// 记一笔：加到某模型四项合计上；高峰时段同时记进 peakByModel 子集。
+    /// 增量为 0 时不新建条目（今天的账里只出现真有用量的模型）。
+    private func add(_ model: String, counter: String, value: Int, peak: Bool = false) {
+        let existing = byModel[model]
+        if value == 0 && existing == nil { return }
+        var entry = existing ?? UsageLedger.zeroCounters()
         entry[counter, default: 0] += value
         byModel[model] = entry
+        if peak {
+            var pe = peakByModel[model] ?? UsageLedger.zeroCounters()
+            pe[counter, default: 0] += value
+            peakByModel[model] = pe
+        }
     }
 
-    /// 今天四项的合计：各模型相加。
+    /// 把某个按模型的字典转成 JSON（键同 COUNTERS）。
+    private static func peakJSON(_ byModel: [String: [String: Int]]) -> [String: JSON] {
+        var out: [String: JSON] = [:]
+        for (m, entry) in byModel {
+            var e: [String: JSON] = [:]
+            for k in COUNTERS { e[k] = .int(entry[k]!) }
+            out[m] = .object(e)
+        }
+        return out
+    }
+
+    /// 今天四项的合计：各模型相加（byModel 已经是全时段合计，peakByModel 只是子集）。
     private func summed() -> [String: Int] {
         var totals = UsageLedger.zeroCounters()
         for entry in byModel.values {
@@ -239,17 +263,23 @@ public final class UsageLedger: UsageSink {
         return totals
     }
 
-    /// 按模型的明细（含各自的费用）+ 填了单价、没填单价的模型个数 + 有单价的模型的费用之和。
+    /// 按模型的明细（含各自的费用）+ 有价、没价的模型个数 + 有价模型的费用之和。
+    /// 有价 = 用户填的价，或没填时走内置 DeepSeek Flash 官方价目。
     private func modelsSnapshot() -> (models: [String: JSON], priced: Int, unpriced: Int, cost: Double) {
         var models: [String: JSON] = [:]
         var priced = 0
         var unpriced = 0
         var cost = 0.0
-        for (m, entry) in byModel {
+        let names = Set(byModel.keys).union(peakByModel.keys).sorted(by: <)
+        for m in names {
+            let total = byModel[m] ?? UsageLedger.zeroCounters()
+            let peak = peakByModel[m] ?? UsageLedger.zeroCounters()
+            var off = UsageLedger.zeroCounters()
+            for k in COUNTERS { off[k] = max(0, total[k]! - peak[k]!) }
             var o: [String: JSON] = [:]
-            for k in COUNTERS { o[k] = .int(entry[k]!) }
-            if let price = config.prices[m] {
-                let c = Self.cost(entry, price: price)
+            for k in COUNTERS { o[k] = .int(total[k]!) }
+            if let match = priceForUse(model: m, prices: config.prices, currency: config.currency) {
+                let c = Self.cost(off, peak: peak, price: match.price)
                 o["cost"] = .double(c)
                 cost += c
                 priced += 1
@@ -262,12 +292,21 @@ public final class UsageLedger: UsageSink {
         return (models, priced, unpriced, cost)
     }
 
-    /// 一个模型的费用（单价都是每百万 token）。
-    private static func cost(_ entry: [String: Int], price: ModelPrice) -> Double {
-        let cached = entry["cached_tokens"]!
-        let total = Double(entry["prompt_tokens"]! - cached) * price.input
-            + Double(cached) * price.cached
-            + Double(entry["completion_tokens"]!) * price.output
+    /// 一个模型的费用：空闲和高峰两份用量分别套对应的价（单价都是每百万 token）。
+    /// 没填高峰价（不分时）时，高峰时段的用量也按同一组价算。
+    private static func cost(_ offPeak: [String: Int], peak: [String: Int], price: ModelPrice) -> Double {
+        func rates(_ e: [String: Int], input: Double, cachedPrice: Double, outputPrice: Double) -> Double {
+            let cached = e["cached_tokens"]!
+            return Double(e["prompt_tokens"]! - cached) * input
+                + Double(cached) * cachedPrice
+                + Double(e["completion_tokens"]!) * outputPrice
+        }
+        var total = rates(offPeak, input: price.input, cachedPrice: price.cached, outputPrice: price.output)
+        if price.hasPeak {
+            total += rates(peak, input: price.peakInput!, cachedPrice: price.peakCached!, outputPrice: price.peakOutput!)
+        } else {
+            total += rates(peak, input: price.input, cachedPrice: price.cached, outputPrice: price.output)
+        }
         return total / 1_000_000
     }
 
@@ -288,6 +327,7 @@ public final class UsageLedger: UsageSink {
         }
         date = t
         byModel = [:]
+        peakByModel = [:]
         pending = true
         _ = write()
     }
@@ -334,6 +374,7 @@ public final class UsageLedger: UsageSink {
             "requests": .int(totals["requests"]!),
             "last_totals": lastTotalsJSON,
             "by_model": .object(byModelJSON),
+            "peak_by_model": .object(Self.peakJSON(peakByModel)),
             "last_by_model": lastByModelJSON,
         ]
         if let lastEpoch { obj["last_epoch"] = lastEpoch }
@@ -353,6 +394,7 @@ public final class UsageLedger: UsageSink {
         let snap = modelsSnapshot()
         obj["cost"] = .double(snap.cost)
         obj["by_model"] = .object(snap.models)
+        if !peakByModel.isEmpty { obj["peak_by_model"] = .object(Self.peakJSON(peakByModel)) }
         _ = writeText(HISTORY_FILE, JSON.object(obj).serialized() + "\n", append: true)
     }
 
@@ -391,8 +433,15 @@ public final class UsageLedger: UsageSink {
             let totals = Dictionary(uniqueKeysWithValues: COUNTERS.map { ($0, data[$0]!.int!) })
             if totals.values.contains(where: { $0 != 0 }) { bm[""] = totals }
         }
+        var peak: [String: [String: Int]] = [:]
+        if data["peak_by_model"] != nil {
+            // 第 2 版新增的可选高峰子集；不合格就整份按读不懂处理
+            guard let parsed = Self.parseByModel(data["peak_by_model"], valueKeys: COUNTERS) else { return false }
+            peak = parsed
+        }
         date = d
         byModel = bm
+        peakByModel = peak
         lastTotals = Dictionary(uniqueKeysWithValues: SOURCE_KEYS.map { ($0, last[$0]!.int!) })
         lastByModel = Self.parseByModel(data["last_by_model"], valueKeys: SOURCE_KEYS)
         let e = data["last_epoch"]

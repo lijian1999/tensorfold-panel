@@ -19,9 +19,11 @@ public func zoneMenuTitles(systemZone: String) -> [String] {
     ["跟随系统（\(zoneDisplayName(systemZone))）", "北京时间", "太平洋时间"]
 }
 
-/// 菜单里“费用单价…”那一项的标题。
-public func priceMenuTitle(currentModel: String?, prices: [String: ModelPrice]) -> String {
-    if let m = currentModel, !m.isEmpty, prices[m] == nil {
+/// 菜单里“费用单价…”那一项的标题。当前模型没价（用户价或内置 DeepSeek 官方价）时提示未填。
+public func priceMenuTitle(currentModel: String?, prices: [String: ModelPrice],
+                           currency: String = "$") -> String {
+    if let m = currentModel, !m.isEmpty,
+       priceForUse(model: m, prices: prices, currency: currency) == nil {
         return "费用单价…（当前模型未填）"
     }
     return "费用单价…"
